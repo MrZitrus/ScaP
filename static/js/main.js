@@ -568,8 +568,24 @@ function renderEpisodeTable() {
             row.title = entry.title;
         }
 
-        const progressText = typeof entry.progress === 'number' ? `${entry.progress}%` : '-';
-        const mirrorText = entry.mirror !== undefined && entry.mirror !== null ? entry.mirror : '-';
+        let progressText = '-';
+        if (typeof entry.progress === 'number' && Number.isFinite(entry.progress)) {
+            progressText = `${entry.progress}%`;
+        } else if (typeof entry.progress === 'string' && entry.progress.trim().length > 0) {
+            progressText = entry.progress.trim();
+        }
+
+        let mirrorText = '-';
+        const mirrorLabel = typeof entry.mirror === 'string' ? entry.mirror.trim() : '';
+        const mirrorIndex = typeof entry.mirror_index === 'number' && Number.isFinite(entry.mirror_index)
+            ? Math.max(1, Math.floor(entry.mirror_index))
+            : null;
+
+        if (mirrorLabel) {
+            mirrorText = mirrorIndex ? `#${mirrorIndex} ${mirrorLabel}` : mirrorLabel;
+        } else if (mirrorIndex) {
+            mirrorText = `#${mirrorIndex}`;
+        }
         const triesText = entry.tries !== undefined && entry.tries !== null ? entry.tries : '-';
         let resultSymbol = '⏳';
         if (entry.result === true) {

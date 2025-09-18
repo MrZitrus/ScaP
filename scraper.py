@@ -554,6 +554,24 @@ class StreamScraper:
         except Exception as exc:
             logging.debug(f"Konnte episode_update nicht senden ({episode_id}): {exc}")
 
+    def _mirror_label(self, stream_url: str, index: Optional[int] = None) -> Optional[str]:
+        """Gibt eine lesbare Mirror-Bezeichnung zurück."""
+        if not stream_url:
+            return None
+
+        try:
+            parsed = urlparse(stream_url)
+            host = parsed.netloc or (parsed.path.split('/')[0] if parsed.path else '')
+            host = host.lstrip('www.')
+            if host:
+                return host
+        except Exception as exc:
+            logging.debug(f"Mirror-Bezeichnung konnte nicht ermittelt werden: {exc}")
+
+        if index is not None:
+            return f"Mirror {index}"
+        return None
+
     def _ensure_media_entry(self, series_name: str, series_url: str, series_path: str) -> Optional[int]:
         """Sorgt dafür, dass ein Medien-Eintrag für die Serie existiert."""
         if not self.media_db:
@@ -1592,6 +1610,7 @@ class StreamScraper:
                         title=episode_title,
                         progress=0,
                         mirror=None,
+                        mirror_index=None,
                         tries=0,
                         result=False,
                         msg="Keine Streams gefunden"
@@ -1609,6 +1628,7 @@ class StreamScraper:
                     title=episode_title,
                     progress=0,
                     mirror=None,
+                    mirror_index=None,
                     tries=0,
                     result=None,
                     msg="Warte auf Download"
@@ -1618,12 +1638,15 @@ class StreamScraper:
                     tries += 1
                     logging.debug(f"Versuche Mirror {mirror_idx + 1}/{total_mirrors} für {episode_title}")
 
+                    mirror_index = mirror_idx + 1
+                    mirror_label = self._mirror_label(stream_url, mirror_index)
                     current_progress = int((mirror_idx / total_mirrors) * 100) if total_mirrors else 0
                     self._emit_episode_update(
                         episode_id,
                         title=episode_title,
                         progress=current_progress,
-                        mirror=mirror_idx + 1,
+                        mirror=mirror_label,
+                        mirror_index=mirror_index,
                         tries=tries,
                         result=None,
                         msg=f"Versuch {tries} läuft..."
@@ -1653,7 +1676,8 @@ class StreamScraper:
                         episode_id,
                         title=episode_title,
                         progress=final_progress,
-                        mirror=mirror_idx + 1,
+                        mirror=mirror_label,
+                        mirror_index=mirror_index,
                         tries=tries,
                         result=download_success,
                         msg=message
