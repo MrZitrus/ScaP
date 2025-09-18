@@ -524,14 +524,15 @@ class StreamScraper:
         logging.info(f"Trying VOE.sx fallback downloader for: {url}")
         try:
             fallback = VoeFallbackDownloader()
-            filename = f"{title}.mp4"
-            full_path = os.path.join(os.path.dirname(output_path), filename)
+
+            # Verwende denselben (bereits sanitisierten) Zielpfad wie für den regulären Download.
+            target_path = output_path
 
             # Use the fallback downloader directly
-            success = fallback.download_video(url, full_path)
+            success = fallback.download_video(url, target_path)
 
             if success:
-                logging.info(f"VOE fallback: Download successful! File saved to: {full_path}")
+                logging.info(f"VOE fallback: Download successful! File saved to: {target_path}")
                 return True, None
             else:
                 logging.error("VOE fallback: Download failed")
