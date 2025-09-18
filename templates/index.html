@@ -95,6 +95,37 @@
                         </div>
                     </div>
                 </div>
+
+                <div class="card" id="episode-status-card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>Episodenstatus</span>
+                        <div class="form-check form-switch m-0">
+                            <input class="form-check-input" type="checkbox" id="episode-filter-errors">
+                            <label class="form-check-label" for="episode-filter-errors">Nur Fehler</label>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div id="episode-status-table-wrapper" class="table-responsive">
+                            <table class="table table-sm mb-0" id="episode-status-table">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th scope="col">Episode</th>
+                                        <th scope="col">Fortschritt</th>
+                                        <th scope="col">Mirror</th>
+                                        <th scope="col">Versuche</th>
+                                        <th scope="col">Ergebnis</th>
+                                        <th scope="col">Hinweis</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="episode-status-body">
+                                    <tr>
+                                        <td colspan="6" class="text-center text-muted py-3">Noch keine Daten</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- Settings Tab -->

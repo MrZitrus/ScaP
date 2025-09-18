@@ -141,7 +141,7 @@ def remux_to_de(video_in: str, meta=None, desired=DESIRED_LANG_TAGS) -> str | No
 
 
 # -------------------- Public API -----------------------------------------
-def verify_language(video_path: str, prefer_tags=None, require_dub=None, sample_seconds=None, remux=None) -> tuple[bool, str, str | None]:
+def verify_language(video_path: str, prefer_tags=None, require_dub=None, sample_seconds=None, remux=None, meta=None) -> tuple[bool, str, str | None]:
     """
     Prüft Datei. Rückgabe: (ok, detail, fixed_path_or_none)
     ok=True  -> akzeptiert
@@ -155,7 +155,7 @@ def verify_language(video_path: str, prefer_tags=None, require_dub=None, sample_
     remux_setting = remux if remux is not None else REMUX_TO_DE_IF_PRESENT
     
     try:
-        meta = ffprobe_streams(video_path)
+        meta = meta if meta is not None else ffprobe_streams(video_path)
     except Exception as e:
         return False, f"ffprobe-error: {e}", None
 
@@ -168,9 +168,14 @@ def verify_language(video_path: str, prefer_tags=None, require_dub=None, sample_
                 return True, "tag-match-remuxed", out
         return True, "tag-match", None
 
-    # wenn Dub Pflicht und nur Subs vorhanden → ablehnen
-    if require_dub_setting and has_subtitles_in_lang(meta, desired_tags):
-        return False, "subs-only-de", None
+    has_de_subs = has_subtitles_in_lang(meta, desired_tags)
+    if has_de_subs:
+        # Keine deutsche Audiospur, aber Untertitel vorhanden -> akzeptieren
+        return True, "tag-match-subs", None
+
+    # wenn Dub Pflicht und weder Dub noch Untertitel vorhanden → ablehnen
+    if require_dub_setting:
+        return False, "no-de-dub", None
 
     # 2) Inhaltscheck (erste Audiospur)
     lang = ""
