@@ -48,7 +48,7 @@
                     <div class="col-md-6">
                         <div class="d-flex gap-2 justify-content-md-end justify-content-start mt-2 mt-md-0">
                             <button id="update-db-btn" class="btn btn-primary">Datenbank aktualisieren</button>
-                            <button id="load-anime-list-btn" class="btn btn-secondary">Aniworld-Liste laden</button>
+                            <button id="load-aniworld" class="btn btn-secondary">Aniworld-Liste laden</button>
                         </div>
                     </div>
                 </div>
@@ -56,7 +56,7 @@
                 <div id="search-results" class="list-group mb-4">
                     <!-- Search results will be displayed here -->
                 </div>
-                <div id="anime-list" class="mb-4 d-none"></div>
+                <div id="aniworld-results" class="mb-4 d-none"></div>
             </div>
 
             <!-- Direct Download Tab -->
@@ -123,8 +123,11 @@
                     </div>
                     <div class="card-body">
                         <div class="mb-3">
-                            <button id="scan-dir-btn" class="btn btn-primary">Verzeichnis scannen</button>
-                            <button id="clear-db-btn" class="btn btn-danger ms-2">Datenbank zurücksetzen</button>
+                            <div class="btn-group" role="group">
+                                <button id="scan-dir-btn" class="btn btn-primary">Verzeichnis scannen</button>
+                                <button id="repair-db-btn" class="btn btn-warning">Datenbank prüfen</button>
+                                <button id="clear-db-btn" class="btn btn-danger">Datenbank zurücksetzen</button>
+                            </div>
                         </div>
                         <div id="db-stats" class="mt-3">
                             <h5>Statistiken</h5>

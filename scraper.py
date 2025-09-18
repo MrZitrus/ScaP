@@ -1145,43 +1145,86 @@ class StreamScraper:
         pass
 
     def get_anime_list(self) -> List[Dict[str, str]]:
-        """Scrape die Liste aller Animes von aniworld.to"""
-        url = "https://aniworld.to/animes"
+        """Scrape die Liste aller Animes von aniworld.to mit Retry-Logik."""
+        list_url = "https://aniworld.to/animes"
+        selectors = [
+            'ul li a[href^="/anime/stream/"]',
+            'a[href^="/anime/stream/"][title]',
+            '.seriesList a[href^="/anime/stream/"]',
+        ]
+        max_retries = 3
+        last_error: Optional[Exception] = None
 
-        try:
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()  # Wirft Fehler bei HTTP-Statuscode >= 400
+        for attempt in range(1, max_retries + 1):
+            try:
+                logging.debug(f"Hole Anime-Liste (Versuch {attempt}/{max_retries}) von {list_url}")
+                response = self.session.get(list_url, timeout=15)
+                response.raise_for_status()
 
-            soup = BeautifulSoup(response.text, 'html.parser')
-            anime_list = []
+                soup = BeautifulSoup(response.text, 'html.parser')
+                anime_list: List[Dict[str, Any]] = []
+                seen_urls: set[str] = set()
 
-            # Finde alle Anime-Links in allen Genre-Kategorien
-            for link in soup.select('ul li a[href^="/anime/stream/"]'):
-                title = link.text.strip()
-                if 'Stream anschauen' in title:
-                    title = title.replace(' Stream anschauen', '')
-                url = 'https://aniworld.to' + link.get('href', '')
+                for selector in selectors:
+                    for link in soup.select(selector):
+                        href = link.get('href', '').strip()
+                        if not href:
+                            continue
 
-                # Extrahiere alternative Titel falls vorhanden
-                alt_titles = []
-                if link.has_attr('data-alternative-title'):
-                    alt_titles = link.get('data-alternative-title', '').split(', ')
+                        full_url = urljoin("https://aniworld.to", href)
+                        if full_url in seen_urls:
+                            continue
 
-                if title and url:  # Nur hinzufügen wenn Titel und URL vorhanden
-                    # Prüfe ob der Anime bereits in der Liste ist (Duplikate vermeiden)
-                    if not any(anime['url'] == url for anime in anime_list):
+                        title = (
+                            link.get('title')
+                            or link.get('data-title')
+                            or link.get_text(strip=True)
+                            or ''
+                        ).strip()
+                        if not title:
+                            continue
+
+                        if 'Stream anschauen' in title:
+                            title = title.replace(' Stream anschauen', '').strip()
+
+                        alt_titles: List[str] = []
+                        alt_attr = link.get('data-alternative-title') or link.get('data-alt-titles')
+                        if alt_attr:
+                            alt_titles = [alt.strip() for alt in alt_attr.split(',') if alt.strip()]
+
                         anime_list.append({
                             'title': title,
-                            'url': url,
+                            'url': full_url,
                             'alternative_titles': alt_titles,
-                            'type': 'anime'
+                            'type': 'anime',
                         })
+                        seen_urls.add(full_url)
 
-            logging.info(f"Gefunden: {len(anime_list)} Animes")
-            return anime_list
-        except Exception as e:
-            logging.error(f"Fehler beim Scrapen der Anime-Liste: {str(e)}")
-            return []
+                if anime_list:
+                    logging.info(f"Gefunden: {len(anime_list)} Animes")
+                else:
+                    logging.warning("Keine Animes auf der Seite gefunden. Möglicherweise hat sich die Struktur geändert.")
+
+                return anime_list
+            except Exception as error:  # noqa: BLE001 - wir wollen alle Fehler loggen
+                last_error = error
+                logging.warning(
+                    "Fehler beim Laden der Anime-Liste (Versuch %s/%s): %s",
+                    attempt,
+                    max_retries,
+                    error,
+                )
+                if attempt < max_retries:
+                    delay = 1.5 * attempt
+                    logging.debug(f"Warte {delay:.1f}s vor erneutem Versuch...")
+                    time.sleep(delay)
+
+        logging.error(
+            "Fehler beim Scrapen der Anime-Liste nach %s Versuchen: %s",
+            max_retries,
+            last_error,
+        )
+        return []
 
     def get_series_list(self) -> List[Dict[str, str]]:
         """Scrape die Liste aller Serien von s.to"""

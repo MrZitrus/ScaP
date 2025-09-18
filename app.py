@@ -4,11 +4,13 @@ from flask_socketio import SocketIO
 from datetime import datetime
 import os
 import json
-from scraper import StreamScraper
 import logging
 import threading
+import sqlite3
+import shutil
+from scraper import StreamScraper
 from config_manager import get_config
-from database import get_media_db
+from database import get_media_db, reset_media_db
 from gemini_client import GeminiClient
 
 # Get configuration
@@ -107,23 +109,29 @@ def gemini_settings():
 def search():
     query = request.args.get('q', '').strip()
     series_type = request.args.get('type', 'all')
+    include_all = request.args.get('all', 'false').lower() == 'true'
 
-    if not query:
+    base_query = Series.query
+    if series_type != 'all':
+        base_query = base_query.filter(Series.type == series_type)
+
+    if query:
+        like_query = f"%{query}%"
+        base_query = base_query.filter(Series.title.ilike(like_query))
+    elif not include_all:
         return jsonify([])
 
-    # Suche in der Datenbank
-    query = f"%{query}%"
-    if series_type == 'all':
-        results = Series.query.filter(Series.title.ilike(query)).all()
-    else:
-        results = Series.query.filter(Series.title.ilike(query), Series.type == series_type).all()
+    results = base_query.order_by(Series.title.asc()).limit(250).all()
 
-    return jsonify([{
-        'id': s.id,
-        'title': s.title,
-        'url': s.url,
-        'type': s.type
-    } for s in results])
+    return jsonify([
+        {
+            'id': s.id,
+            'title': s.title,
+            'url': s.url,
+            'type': s.type
+        }
+        for s in results
+    ])
 
 @app.route('/api/scrape/list', methods=['POST'])
 def scrape_list():
@@ -161,6 +169,44 @@ def scrape_list():
     except Exception as e:
         logger.error(f"Fehler beim Scraping: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/db/repair', methods=['POST'])
+def repair_database():
+    """Prüft die SQLite-Datenbank und erstellt bei Bedarf eine neue Datei."""
+    db_path = config.get('download.db_path', 'media.db')
+
+    try:
+        if not os.path.exists(db_path):
+            message = f"Datenbank-Datei {db_path} wurde nicht gefunden."
+            logger.warning(message)
+            return jsonify({'status': 'missing', 'message': message}), 404
+
+        connection = sqlite3.connect(db_path)
+        result = connection.execute("PRAGMA integrity_check;").fetchone()
+        connection.close()
+
+        check_status = (result[0] if result else '').strip().lower()
+        if check_status == 'ok':
+            logger.info("Datenbank-Integritätsprüfung erfolgreich: ok")
+            return jsonify({'status': 'ok', 'message': 'Datenbank ist intakt.'})
+
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        backup_path = f"{db_path}.corrupt_{timestamp}.bak"
+        shutil.move(db_path, backup_path)
+        logger.warning("Datenbank war beschädigt. Backup gespeichert unter %s", backup_path)
+
+        global media_db
+        media_db = reset_media_db(db_path)
+
+        return jsonify({
+            'status': 'recreated',
+            'message': 'Beschädigte Datenbank wurde ersetzt. Bitte Verzeichnis erneut scannen.',
+            'backup': backup_path
+        })
+    except Exception as exc:
+        logger.error("Fehler bei der Datenbank-Reparatur: %s", exc, exc_info=True)
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 @app.route('/api/download', methods=['POST'])
 def start_download():
