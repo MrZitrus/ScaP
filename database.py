@@ -73,6 +73,8 @@ class MediaDatabase:
             file_size INTEGER,
             has_german_dub BOOLEAN DEFAULT 0,
             has_german_sub BOOLEAN DEFAULT 0,
+            audio_lang TEXT,
+            subtitle_langs TEXT,
             summary TEXT,
             plot_points TEXT,
             ai_enhanced BOOLEAN DEFAULT 0,
@@ -81,6 +83,17 @@ class MediaDatabase:
             UNIQUE (season_id, episode_number)
         )
         ''')
+
+        # Füge neue Spalten hinzu, falls die Tabelle bereits existiert
+        try:
+            cursor.execute("ALTER TABLE episodes ADD COLUMN audio_lang TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE episodes ADD COLUMN subtitle_langs TEXT")
+        except sqlite3.OperationalError:
+            pass
 
         conn.commit()
         conn.close()
@@ -148,7 +161,8 @@ class MediaDatabase:
 
     def add_episode(self, season_id: int, episode_number: int, title: str, filename: str,
                    file_path: str, file_size: int = 0, has_german_dub: bool = False,
-                   has_german_sub: bool = False) -> int:
+                   has_german_sub: bool = False, audio_lang: Optional[str] = None,
+                   subtitle_langs: Optional[List[str]] = None) -> int:
         """
         Füge eine neue Episode zur Datenbank hinzu.
 
@@ -169,13 +183,21 @@ class MediaDatabase:
         cursor = conn.cursor()
 
         try:
+            subtitle_langs_json = None
+            if audio_lang:
+                audio_lang = audio_lang.lower()
+            if subtitle_langs:
+                normalized_subs = [lang.lower() for lang in subtitle_langs if lang]
+                if normalized_subs:
+                    subtitle_langs_json = json.dumps(normalized_subs, ensure_ascii=False)
+
             cursor.execute(
                 """INSERT OR REPLACE INTO episodes
                    (season_id, episode_number, title, filename, file_path, file_size,
-                    has_german_dub, has_german_sub, download_date)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    has_german_dub, has_german_sub, audio_lang, subtitle_langs, download_date)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (season_id, episode_number, title, filename, file_path, file_size,
-                 has_german_dub, has_german_sub, datetime.now())
+                 has_german_dub, has_german_sub, audio_lang, subtitle_langs_json, datetime.now())
             )
             episode_id = cursor.lastrowid
             conn.commit()
@@ -299,6 +321,42 @@ class MediaDatabase:
         conn.close()
 
         return [dict(row) for row in results]
+
+    def get_season_by_media_and_number(self, media_id: int, season_number: int) -> Optional[Dict[str, Any]]:
+        """Hole eine bestimmte Staffel anhand Medien-ID und Staffelnummer."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT * FROM seasons WHERE media_id = ? AND season_number = ?",
+            (media_id, season_number)
+        )
+        result = cursor.fetchone()
+
+        conn.close()
+
+        if result:
+            return dict(result)
+        return None
+
+    def get_episode_by_season_and_number(self, season_id: int, episode_number: int) -> Optional[Dict[str, Any]]:
+        """Hole eine Episode anhand Staffel-ID und Episodennummer."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT * FROM episodes WHERE season_id = ? AND episode_number = ?",
+            (season_id, episode_number)
+        )
+        result = cursor.fetchone()
+
+        conn.close()
+
+        if result:
+            return dict(result)
+        return None
 
     def get_episodes_by_season_id(self, season_id: int) -> List[Dict[str, Any]]:
         """
@@ -471,6 +529,15 @@ class MediaDatabase:
                                 has_german_dub = '[GerDub]' in filename
                                 has_german_sub = '[GerSub]' in filename
 
+                                audio_lang = None
+                                if has_german_dub:
+                                    audio_lang = 'de'
+                                elif has_german_sub:
+                                    audio_lang = 'ja'
+
+                                subtitle_langs = ['de'] if has_german_sub else []
+                                subtitle_langs_json = json.dumps(subtitle_langs, ensure_ascii=False) if subtitle_langs else None
+
                                 # Prüfe, ob bereits ein Eintrag für diese Episode existiert
                                 # (um doppelte Einträge zu vermeiden)
                                 cursor.execute(
@@ -483,8 +550,8 @@ class MediaDatabase:
                                     # Aktualisiere den bestehenden Eintrag mit dem neuesten Dateinamen
                                     cursor.execute(
                                         "UPDATE episodes SET filename = ?, file_path = ?, file_size = ?, "
-                                        "has_german_dub = ?, has_german_sub = ? WHERE id = ?",
-                                        (filename, file_path, file_size, has_german_dub, has_german_sub, existing_episode[0])
+                                        "has_german_dub = ?, has_german_sub = ?, audio_lang = ?, subtitle_langs = ? WHERE id = ?",
+                                        (filename, file_path, file_size, has_german_dub, has_german_sub, audio_lang, subtitle_langs_json, existing_episode[0])
                                     )
                                     conn.commit()
                                     logger.info(f"Episodeneintrag aktualisiert: S{season_number:02d}E{episode_number:02d} - {episode_title}")
@@ -497,7 +564,7 @@ class MediaDatabase:
                                 # Erstelle einen Eintrag für die Episode
                                 episode_id = self.add_episode(
                                     season_id, episode_number, episode_title, filename, file_path,
-                                    file_size, has_german_dub, has_german_sub
+                                    file_size, has_german_dub, has_german_sub, audio_lang, subtitle_langs if subtitle_langs else None
                                 )
 
                                 if episode_id > 0:
