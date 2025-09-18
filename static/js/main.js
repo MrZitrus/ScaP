@@ -6,8 +6,8 @@ const searchInput = document.getElementById('search-input');
 const searchType = document.getElementById('search-type');
 const searchResults = document.getElementById('search-results');
 const updateDbBtn = document.getElementById('update-db-btn');
-const loadAnimeListBtn = document.getElementById('load-anime-list-btn');
-const animeListContainer = document.getElementById('anime-list');
+const loadAniworldBtn = document.getElementById('load-aniworld');
+const aniworldResults = document.getElementById('aniworld-results');
 const voeUrlInput = document.getElementById('voe-url');
 const voeFilenameInput = document.getElementById('voe-filename');
 const voeDownloadBtn = document.getElementById('voe-download-btn');
@@ -20,6 +20,7 @@ const downloadDirInput = document.getElementById('download-dir');
 const currentDownloadDir = document.getElementById('current-download-dir');
 const scanDirBtn = document.getElementById('scan-dir-btn');
 const clearDbBtn = document.getElementById('clear-db-btn');
+const repairDbBtn = document.getElementById('repair-db-btn');
 const dbStats = document.getElementById('db-stats');
 
 // Library elements
@@ -56,8 +57,8 @@ document.addEventListener('DOMContentLoaded', () => {
     updateDbBtn.addEventListener('click', updateDatabase);
 
     // Load Aniworld list
-    if (loadAnimeListBtn) {
-        loadAnimeListBtn.addEventListener('click', loadAniworldList);
+    if (loadAniworldBtn) {
+        loadAniworldBtn.addEventListener('click', loadAniworldList);
     }
 
     // VOE.sx download button
@@ -89,6 +90,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     scanDirBtn.addEventListener('click', scanDirectory);
     clearDbBtn.addEventListener('click', clearDatabase);
+
+    if (repairDbBtn) {
+        repairDbBtn.addEventListener('click', repairDatabase);
+    }
 
     // Library event listeners
     librarySearch.addEventListener('input', handleLibrarySearch);
@@ -218,86 +223,153 @@ function updateDatabase() {
 }
 
 /**
- * Load Aniworld list via backend scrape
+ * Load Aniworld list via backend scrape and render results from the local database
  */
-function loadAniworldList() {
-    if (!loadAnimeListBtn || !animeListContainer) {
+async function loadAniworldList() {
+    if (!loadAniworldBtn || !aniworldResults) {
         return;
     }
 
-    const originalLabel = loadAnimeListBtn.innerHTML;
-    loadAnimeListBtn.disabled = true;
-    loadAnimeListBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Laedt...';
+    const originalLabel = loadAniworldBtn.innerHTML;
+    loadAniworldBtn.disabled = true;
+    loadAniworldBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Lädt...';
 
     showAniworldMessage('Lade Aniworld-Liste...', 'info');
 
-    fetch('/api/scrape/list', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ type: 'anime' })
-    })
-        .then(response => response.json())
-        .then(data => {
-            if (data.status === 'success' && Array.isArray(data.items)) {
-                renderAniworldList(data.items);
-            } else {
-                const message = typeof data.error === 'string' ? data.error : 'Unbekannter Fehler';
-                showAniworldMessage('Fehler beim Laden: ' + message, 'danger');
-            }
-        })
-        .catch(error => {
-            console.error('Error loading Aniworld list:', error);
-            showAniworldMessage('Fehler beim Laden der Aniworld-Liste', 'danger');
-        })
-        .finally(() => {
-            loadAnimeListBtn.disabled = false;
-            loadAnimeListBtn.innerHTML = originalLabel;
+    try {
+        const scrapeResponse = await fetch('/api/scrape/list', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ type: 'anime' })
         });
+
+        const scrapeData = await scrapeResponse.json();
+        if (!scrapeResponse.ok) {
+            throw new Error(scrapeData?.error || scrapeResponse.statusText);
+        }
+
+        const scrapedItems = Array.isArray(scrapeData.items) ? scrapeData.items : [];
+
+        const params = new URLSearchParams({ type: 'anime', all: 'true' });
+        let databaseItems = [];
+        try {
+            const dbResponse = await fetch(`/search?${params.toString()}`);
+            if (dbResponse.ok) {
+                databaseItems = await dbResponse.json();
+            } else {
+                console.warn('Search request for Aniworld items failed with status', dbResponse.status);
+            }
+        } catch (err) {
+            console.warn('Search request for Aniworld items failed:', err);
+        }
+
+        const displayItems = Array.isArray(databaseItems) && databaseItems.length > 0
+            ? databaseItems
+            : scrapedItems;
+
+        renderAniworldList(displayItems, scrapeData.count || displayItems.length, scrapedItems);
+    } catch (error) {
+        console.error('Error loading Aniworld list:', error);
+        showAniworldMessage(`Fehler: ${error.message}`, 'danger');
+    } finally {
+        loadAniworldBtn.disabled = false;
+        loadAniworldBtn.innerHTML = originalLabel;
+    }
 }
 
 /**
  * Render Aniworld results
  */
-function renderAniworldList(items) {
-    if (!animeListContainer) {
+function renderAniworldList(items, scrapedCount = null, fallbackItems = []) {
+    if (!aniworldResults) {
         return;
     }
 
-    animeListContainer.innerHTML = '';
-    animeListContainer.classList.remove('d-none');
+    const initialItems = Array.isArray(items) ? items : [];
+    let displayItems = initialItems;
+    let usedFallback = false;
 
-    if (!Array.isArray(items) || items.length === 0) {
+    if (displayItems.length === 0 && Array.isArray(fallbackItems) && fallbackItems.length > 0) {
+        displayItems = fallbackItems;
+        usedFallback = true;
+    }
+
+    if (!Array.isArray(displayItems) || displayItems.length === 0) {
         showAniworldMessage('Keine Animes gefunden.', 'info');
         return;
     }
 
+    aniworldResults.innerHTML = '';
+    aniworldResults.classList.remove('d-none');
+
     const summary = document.createElement('div');
     summary.className = 'alert alert-secondary mb-2';
-    summary.textContent = items.length + ' Animes geladen';
-    animeListContainer.appendChild(summary);
+    const displayCount = displayItems.length;
+    const totalCount = typeof scrapedCount === 'number' ? scrapedCount : displayCount;
+    const infoText = totalCount !== displayCount
+        ? `${displayCount} von ${totalCount} Animes geladen`
+        : `${displayCount} Animes geladen`;
+
+    summary.textContent = usedFallback
+        ? `${infoText} (direkt aus Scrape)`
+        : infoText;
+
+    if (usedFallback) {
+        const hint = document.createElement('div');
+        hint.className = 'small text-muted mt-1';
+        hint.textContent = 'Hinweis: Die Einträge konnten nicht aus der lokalen Datenbank gelesen werden.';
+        summary.appendChild(hint);
+    }
+
+    aniworldResults.appendChild(summary);
 
     const listGroup = document.createElement('div');
     listGroup.className = 'list-group';
 
-    items.forEach((item) => {
-        const entry = document.createElement('a');
-        entry.href = '#';
-        entry.className = 'list-group-item list-group-item-action d-flex justify-content-between align-items-center';
+    displayItems.forEach((item) => {
+        const entry = document.createElement('div');
+        entry.className = 'list-group-item';
 
-        const titleWrapper = document.createElement('div');
+        const row = document.createElement('div');
+        row.className = 'row align-items-center g-2';
+        entry.appendChild(row);
+
+        const infoCol = document.createElement('div');
+        infoCol.className = 'col';
+
         const title = document.createElement('strong');
         title.textContent = item.title || 'Unbekannt';
-        titleWrapper.appendChild(title);
+        infoCol.appendChild(title);
 
         const badge = document.createElement('span');
         badge.className = 'badge bg-primary ms-2';
         badge.textContent = 'Anime';
-        titleWrapper.appendChild(badge);
+        infoCol.appendChild(badge);
+
+        const alternativeTitles = Array.isArray(item.alternative_titles)
+            ? item.alternative_titles
+            : Array.isArray(item.alt_titles)
+                ? item.alt_titles
+                : typeof item.alternative_titles === 'string'
+                    ? item.alternative_titles.split(',').map((alt) => alt.trim()).filter(Boolean)
+                    : [];
+
+        if (alternativeTitles.length > 0) {
+            const alt = document.createElement('div');
+            alt.className = 'small text-muted mt-1';
+            alt.textContent = alternativeTitles.join(' • ');
+            infoCol.appendChild(alt);
+        }
+
+        row.appendChild(infoCol);
+
+        const actionCol = document.createElement('div');
+        actionCol.className = 'col-auto';
 
         const downloadBtn = document.createElement('button');
-        downloadBtn.className = 'btn btn-sm btn-success download-btn';
+        downloadBtn.className = 'btn btn-sm btn-success';
         downloadBtn.textContent = 'Download';
 
         if (!item.url) {
@@ -308,33 +380,33 @@ function renderAniworldList(items) {
         } else {
             downloadBtn.addEventListener('click', (event) => {
                 event.preventDefault();
-                event.stopPropagation();
                 startDownload(item.url);
             });
         }
 
-        entry.appendChild(titleWrapper);
-        entry.appendChild(downloadBtn);
+        actionCol.appendChild(downloadBtn);
+        row.appendChild(actionCol);
+
         listGroup.appendChild(entry);
     });
 
-    animeListContainer.appendChild(listGroup);
+    aniworldResults.appendChild(listGroup);
 }
 
 /**
  * Show helper message inside Aniworld list container
  */
 function showAniworldMessage(message, level = 'info') {
-    if (!animeListContainer) {
+    if (!aniworldResults) {
         return;
     }
 
-    animeListContainer.innerHTML = '';
+    aniworldResults.innerHTML = '';
     const alert = document.createElement('div');
     alert.className = 'alert alert-' + level + ' mb-0';
     alert.textContent = message;
-    animeListContainer.appendChild(alert);
-    animeListContainer.classList.remove('d-none');
+    aniworldResults.appendChild(alert);
+    aniworldResults.classList.remove('d-none');
 }
 
 /**
@@ -622,6 +694,47 @@ function clearDatabase() {
         clearDbBtn.disabled = false;
         clearDbBtn.textContent = 'Datenbank zurücksetzen';
     });
+}
+
+/**
+ * Repair database by running integrity check and recreating if needed
+ */
+function repairDatabase() {
+    if (!repairDbBtn) {
+        return;
+    }
+
+    const originalLabel = repairDbBtn.innerHTML;
+    repairDbBtn.disabled = true;
+    repairDbBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Prüfe...';
+
+    fetch('/api/db/repair', {
+        method: 'POST'
+    })
+        .then(async (response) => {
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || data.message || response.statusText);
+            }
+            return data;
+        })
+        .then((data) => {
+            const backupInfo = data.backup ? `\nBackup: ${data.backup}` : '';
+            const message = data.message || 'Datenbank wurde geprüft.';
+            alert(message + backupInfo);
+            loadDatabaseStats();
+            if (data.status === 'recreated') {
+                loadLibraryContent();
+            }
+        })
+        .catch((error) => {
+            console.error('Error repairing database:', error);
+            alert('Fehler bei der Datenbank-Prüfung: ' + error.message);
+        })
+        .finally(() => {
+            repairDbBtn.disabled = false;
+            repairDbBtn.innerHTML = originalLabel;
+        });
 }
 
 /**
