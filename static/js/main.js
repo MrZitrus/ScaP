@@ -35,10 +35,14 @@ const statusProgress = document.getElementById('status-progress');
 const statusEpisode = document.getElementById('status-episode');
 const statusTotalEpisodes = document.getElementById('status-total-episodes');
 const downloadStatus = document.getElementById('download-status');
+const episodeStatusTableBody = document.getElementById('episode-status-body');
+const episodeFilterErrors = document.getElementById('episode-filter-errors');
 
 // Variables
 let searchTimeout = null;
 let isDownloading = false;
+let episodeStatus = new Map();
+let wasDownloading = false;
 
 // Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
@@ -68,6 +72,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Cancel download button
     cancelDownloadBtn.addEventListener('click', cancelDownload);
+
+    if (episodeFilterErrors) {
+        episodeFilterErrors.addEventListener('change', renderEpisodeTable);
+    }
 
     // Check download status on page load
     checkDownloadStatus();
@@ -108,6 +116,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     socket.on('status_update', updateStatusDisplay);
+    socket.on('episode_update', handleEpisodeUpdate);
 });
 
 // Functions
@@ -430,6 +439,7 @@ function resetSession() {
         console.log('Session reset:', data);
         alert('Session zurückgesetzt');
         checkDownloadStatus();
+        resetEpisodeStatus();
     })
     .catch(error => {
         console.error('Error resetting session:', error);
@@ -453,6 +463,7 @@ function cancelDownload() {
         console.log('Download cancelled:', data);
         alert('Download abgebrochen');
         checkDownloadStatus();
+        resetEpisodeStatus();
     })
     .catch(error => {
         console.error('Error cancelling download:', error);
@@ -478,7 +489,13 @@ function checkDownloadStatus() {
 function updateStatusDisplay(status) {
     console.log('Status update:', status);
 
+    const prevDownloading = wasDownloading;
     isDownloading = status.is_downloading;
+    wasDownloading = isDownloading;
+
+    if (!prevDownloading && isDownloading) {
+        resetEpisodeStatus();
+    }
 
     if (isDownloading) {
         downloadStatus.classList.add('downloading');
@@ -499,6 +516,103 @@ function updateStatusDisplay(status) {
         statusTotalEpisodes.textContent = '-';
         cancelDownloadBtn.style.display = 'none';
     }
+}
+
+function handleEpisodeUpdate(update) {
+    if (!episodeStatusTableBody || !update || !update.episode_id) {
+        return;
+    }
+
+    const existing = episodeStatus.get(update.episode_id) || {};
+    episodeStatus.set(update.episode_id, {
+        ...existing,
+        ...update,
+    });
+
+    renderEpisodeTable();
+}
+
+function renderEpisodeTable() {
+    if (!episodeStatusTableBody) {
+        return;
+    }
+
+    episodeStatusTableBody.innerHTML = '';
+
+    const showOnlyErrors = episodeFilterErrors ? episodeFilterErrors.checked : false;
+    const entries = Array.from(episodeStatus.values()).sort((a, b) => {
+        if (!a.episode_id || !b.episode_id) {
+            return 0;
+        }
+        return a.episode_id.localeCompare(b.episode_id);
+    });
+
+    let visibleCount = 0;
+
+    entries.forEach((entry) => {
+        const isError = entry.result === false;
+        if (showOnlyErrors && !isError) {
+            return;
+        }
+
+        visibleCount += 1;
+
+        const row = document.createElement('tr');
+        if (entry.result === true) {
+            row.classList.add('table-success');
+        } else if (entry.result === false) {
+            row.classList.add('table-danger');
+        }
+
+        if (entry.title) {
+            row.title = entry.title;
+        }
+
+        const progressText = typeof entry.progress === 'number' ? `${entry.progress}%` : '-';
+        const mirrorText = entry.mirror !== undefined && entry.mirror !== null ? entry.mirror : '-';
+        const triesText = entry.tries !== undefined && entry.tries !== null ? entry.tries : '-';
+        let resultSymbol = '⏳';
+        if (entry.result === true) {
+            resultSymbol = '✅';
+        } else if (entry.result === false) {
+            resultSymbol = '❌';
+        }
+
+        const cells = [
+            entry.episode_id || '-',
+            progressText,
+            mirrorText,
+            triesText,
+            resultSymbol,
+            entry.msg || '',
+        ];
+
+        cells.forEach((value, index) => {
+            const cell = document.createElement('td');
+            cell.textContent = value;
+            if (index === 5) {
+                cell.classList.add('text-break');
+            }
+            row.appendChild(cell);
+        });
+
+        episodeStatusTableBody.appendChild(row);
+    });
+
+    if (visibleCount === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 6;
+        cell.className = 'text-center text-muted py-3';
+        cell.textContent = showOnlyErrors ? 'Keine Fehler' : 'Noch keine Daten';
+        row.appendChild(cell);
+        episodeStatusTableBody.appendChild(row);
+    }
+}
+
+function resetEpisodeStatus() {
+    episodeStatus = new Map();
+    renderEpisodeTable();
 }
 
 /**

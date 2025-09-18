@@ -232,6 +232,8 @@ class DownloadTask:
     output_path: str
     title: str
     episode_num: int = 0
+    last_detail: Optional[str] = None
+    last_result: Optional[bool] = None
 
     def __str__(self):
         return f"DownloadTask(title={self.title}, episode_num={self.episode_num})"
@@ -487,7 +489,7 @@ class StreamScraper:
             logging.error(f"Fehler beim Folgen des Redirects: {str(e)}")
             return None
 
-    def _try_voe_fallback(self, url, output_path, title):
+    def _try_voe_fallback(self, url, output_path, title) -> tuple[bool, Optional[str]]:
         """
         Try to download a VOE.sx video using the fallback downloader.
 
@@ -497,7 +499,7 @@ class StreamScraper:
             title (str): Title of the video
 
         Returns:
-            bool: True if successful, False otherwise
+            Tuple[bool, Optional[str]]: Erfolg und Detailmeldung
         """
         logging.info(f"Trying VOE.sx fallback downloader for: {url}")
         try:
@@ -510,47 +512,117 @@ class StreamScraper:
 
             if success:
                 logging.info(f"VOE fallback: Download successful! File saved to: {full_path}")
-                return True
+                return True, None
             else:
                 logging.error("VOE fallback: Download failed")
-                return False
+                return False, "fallback-error:Download fehlgeschlagen"
         except Exception as e:
             logging.error(f"VOE fallback: Error - {str(e)}")
-            return False
+            return False, f"fallback-error:{e}"
 
-    def _verify_german_audio(self, video_path: str, title: str) -> bool:
+    def _emit_episode_update(self, episode_id: str, **payload):
+        """Sendet einen WebSocket-Status für eine Episode, falls SocketIO aktiv ist."""
+        if not self.socketio:
+            return
+
+        data = {'episode_id': episode_id}
+        data.update(payload)
+
+        try:
+            self.socketio.emit('episode_update', data)
+        except Exception as exc:
+            logging.debug(f"Konnte episode_update nicht senden ({episode_id}): {exc}")
+
+    def _format_result_message(self, detail: Optional[str], success: bool) -> str:
+        """Wandelt technische Detailcodes in nutzerfreundliche Meldungen um."""
+        if not detail:
+            return "Erfolgreich" if success else "Fehlgeschlagen"
+
+        normalized = detail.lower()
+
+        success_map = {
+            'tag-match': 'DE-Tag gefunden',
+            'tag-match-remuxed': 'Remux auf deutsche Spur',
+            'tag-match-subs': 'nur GerSub',
+            'accepted-after-remux': 'Remux + Whisper bestätigt',
+        }
+        failure_map = {
+            'no-de-dub': 'Keine deutsche Tonspur',
+            'subs-only-de': 'Nur Untertitel gefunden',
+            'language-guard-missing': 'Language Guard nicht verfügbar',
+        }
+
+        if success and normalized in success_map:
+            return success_map[normalized]
+        if not success and normalized in failure_map:
+            return failure_map[normalized]
+
+        if normalized.startswith('content-match:'):
+            lang = normalized.split(':', 1)[1] or '?'
+            return f"Whisper: {lang}"
+        if normalized.startswith('mismatch:'):
+            lang = normalized.split(':', 1)[1] or 'unbekannt'
+            return f"Spracherkennung: {lang}"
+        if normalized.startswith('download-error:'):
+            return normalized.split(':', 1)[1].strip() or 'Download-Fehler'
+        if normalized.startswith('ffprobe-error:'):
+            return normalized.split(':', 1)[1].strip() or 'ffprobe-Fehler'
+        if normalized.startswith('language-guard-error:'):
+            return normalized.split(':', 1)[1].strip() or 'Language Guard Fehler'
+        if normalized.startswith('fallback-error:'):
+            return normalized.split(':', 1)[1].strip() or 'Fallback-Fehler'
+
+        return detail
+
+    def _verify_german_audio(self, video_path: str, title: str) -> tuple[bool, Optional[str]]:
         """
-        Prüft, ob die heruntergeladene Datei deutsche Audiospur hat.
-        
-        Args:
-            video_path (str): Pfad zur Video-Datei
-            title (str): Titel für Logging
-            
+        Prüft, ob die heruntergeladene Datei deutsche Audiospur oder Untertitel hat.
+
         Returns:
-            bool: True wenn deutsche Audiospur vorhanden, False sonst
+            Tuple[bool, Optional[str]]: Ergebnis und Detailmeldung
         """
         try:
-            from language_guard import verify_language
-            
+            from language_guard import (
+                verify_language,
+                ffprobe_streams,
+                audio_lang_indices,
+                has_subtitles_in_lang,
+            )
+
             # Hole Language Guard Konfiguration
             lang_cfg = self.config.get('language', {})
-            prefer = set(map(str.lower, lang_cfg.get('prefer', ['de','deu','ger'])))
+            prefer = set(map(str.lower, lang_cfg.get('prefer', ['de', 'deu', 'ger'])))
             require_dub = lang_cfg.get('require_dub', True)
             sample_seconds = lang_cfg.get('sample_seconds', 45)
             remux = lang_cfg.get('remux_to_de_if_present', True)
-            
+
             logging.info(f"Prüfe deutsche Audiospur für: {title}")
+
+            try:
+                meta = ffprobe_streams(video_path)
+            except Exception as meta_err:
+                logging.error(f"ffprobe Fehler für {title}: {meta_err}")
+                return False, f"ffprobe-error:{meta_err}"
+
+            audio_matches = audio_lang_indices(meta, prefer)
+            subtitle_matches = has_subtitles_in_lang(meta, prefer)
+
+            if not audio_matches and subtitle_matches:
+                logging.info(f"{title}: deutsche Untertitel erkannt, akzeptiere GerSub.")
+                return True, "tag-match-subs"
+
             ok, detail, fixed_path = verify_language(
                 video_path,
                 prefer_tags=prefer,
                 require_dub=require_dub,
                 sample_seconds=sample_seconds,
-                remux=remux
+                remux=remux,
+                meta=meta,
             )
-            
+
             if ok:
                 logging.info(f"✓ Deutsche Audiospur bestätigt für {title}: {detail}")
-                
+
                 # Falls eine remuxte Datei erstellt wurde, ersetze die ursprüngliche
                 if fixed_path and fixed_path != video_path:
                     try:
@@ -563,46 +635,46 @@ class StreamScraper:
                             logging.info(f"Datei erfolgreich remuxed: {video_path}")
                     except Exception as e:
                         logging.error(f"Fehler beim Ersetzen der remuxten Datei: {e}")
-                
-                return True
-            else:
-                logging.warning(f"✗ Keine deutsche Audiospur gefunden für {title}: {detail}")
-                
-                # Unbrauchbare Datei über temporären Pfad löschen
-                try:
-                    target_path = Path(video_path)
-                    if target_path.exists():
-                        reject_path = target_path.with_suffix(target_path.suffix + '.reject')
-                        if reject_path.exists():
-                            reject_path.unlink(missing_ok=True)
-                        target_path.replace(reject_path)
-                        try:
-                            reject_path.unlink(missing_ok=True)
-                        except Exception as cleanup_err:
-                            logging.warning(f"Temporäre Reject-Datei konnte nicht entfernt werden: {cleanup_err}")
-                        logging.info(f"Datei ohne deutsche Audiospur gelöscht: {video_path}")
-                except Exception as e:
-                    logging.error(f"Fehler beim Löschen der Datei: {e}")
 
+                return True, detail
 
-                return False
-                
+            logging.warning(f"✗ Keine deutsche Audiospur gefunden für {title}: {detail}")
+
+            # Unbrauchbare Datei über temporären Pfad löschen
+            try:
+                target_path = Path(video_path)
+                if target_path.exists():
+                    reject_path = target_path.with_suffix(target_path.suffix + '.reject')
+                    if reject_path.exists():
+                        reject_path.unlink(missing_ok=True)
+                    target_path.replace(reject_path)
+                    try:
+                        reject_path.unlink(missing_ok=True)
+                    except Exception as cleanup_err:
+                        logging.warning(f"Temporäre Reject-Datei konnte nicht entfernt werden: {cleanup_err}")
+                    logging.info(f"Datei ohne deutsche Audiospur gelöscht: {video_path}")
+            except Exception as e:
+                logging.error(f"Fehler beim Löschen der Datei: {e}")
+
+            return False, detail
+
         except ImportError:
             logging.warning("Language Guard nicht verfügbar - überspringe Sprachprüfung")
-            # Konfigurierbar: bei fehlender Language Guard akzeptieren oder ablehnen
             accept_on_error = self.config.get('language.accept_on_error', False)
-            return accept_on_error
+            return accept_on_error, 'language-guard-missing'
         except Exception as e:
             logging.error(f"Fehler bei der Sprachprüfung für {title}: {e}")
-            # Konfigurierbar: bei Fehlern akzeptieren oder ablehnen
             accept_on_error = self.config.get('language.accept_on_error', False)
-            return accept_on_error
+            return accept_on_error, f"language-guard-error:{e}"
 
-    def _download_video(self, task: DownloadTask, max_retries: int = 3) -> bool:
+    def _download_video(self, task: DownloadTask, max_retries: int = 3) -> tuple[bool, Optional[str]]:
         """Video von VOE.sx oder maxfinishseveral.com herunterladen"""
         retries = 0
         rd_failed = False  # Real-Debrid Fehlschlag
         original_url = None  # Store the original URL before Real-Debrid
+
+        task.last_detail = None
+        task.last_result = None
 
         # Sicherstellen, dass task.url ein String ist
         if isinstance(task.url, list):
@@ -611,10 +683,14 @@ class StreamScraper:
                 logging.debug(f"Verwende erste URL aus Liste: {task.url}")
             else:
                 logging.error(f"Keine gültige URL gefunden für {task.title}")
-                return False
+                task.last_detail = 'download-error:Keine gültige URL'
+                task.last_result = False
+                return False, task.last_detail
         elif not isinstance(task.url, str):
             logging.error(f"Ungültiger URL-Typ für {task.title}: {type(task.url)}")
-            return False
+            task.last_detail = 'download-error:Ungültiger URL-Typ'
+            task.last_result = False
+            return False, task.last_detail
 
         # Check if this is a VOE.sx URL
         parsed_url = urlparse(task.url)
@@ -629,7 +705,9 @@ class StreamScraper:
             # Check if cancel was requested
             if self.download_status.is_cancel_requested():
                 logging.info(f"Download abgebrochen für: {task.title}")
-                return False
+                task.last_detail = 'download-error:Abgebrochen'
+                task.last_result = False
+                return False, task.last_detail
 
             try:
                 if retries > 0:
@@ -658,13 +736,20 @@ class StreamScraper:
                         # If this is a VOE.sx URL and we have the original URL, try fallback right away
                         if is_voe and original_url:
                             logging.info("Real-Debrid fehlgeschlagen für VOE.sx Link, versuche direkte Fallback-Methode...")
-                            if self._try_voe_fallback(original_url, task.output_path, task.title):
+                            fallback_success, fallback_detail = self._try_voe_fallback(original_url, task.output_path, task.title)
+                            if fallback_success:
                                 logging.debug("VOE.sx Fallback erfolgreich, prüfe deutsche Audiospur...")
-                                if self._verify_german_audio(task.output_path, task.title):
-                                    return True
-                                else:
-                                    logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
-                                    return False
+                                lang_ok, lang_detail = self._verify_german_audio(task.output_path, task.title)
+                                final_detail = lang_detail or fallback_detail
+                                task.last_detail = final_detail
+                                task.last_result = lang_ok
+                                if lang_ok:
+                                    return True, final_detail
+                                logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
+                                return False, final_detail
+                            elif fallback_detail:
+                                task.last_detail = fallback_detail
+                                task.last_result = False
 
                         continue
 
@@ -683,12 +768,15 @@ class StreamScraper:
                     logging.info(f"Download erfolgreich: {task.title}")
                     
                     # Language Guard: Prüfe deutsche Audiospur
-                    if self._verify_german_audio(task.output_path, task.title):
-                        return True
-                    else:
-                        # Datei entspricht nicht den Sprachanforderungen
-                        logging.warning(f"Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
-                        return False
+                    lang_ok, lang_detail = self._verify_german_audio(task.output_path, task.title)
+                    task.last_detail = lang_detail
+                    task.last_result = lang_ok
+                    if lang_ok:
+                        return True, lang_detail
+
+                    # Datei entspricht nicht den Sprachanforderungen
+                    logging.warning(f"Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
+                    return False, lang_detail
 
                 except Exception as e:
                     error_msg = str(e)
@@ -701,28 +789,43 @@ class StreamScraper:
                     raise  # Re-raise für andere Fehler
 
             except Exception as e:
-                logging.error(f"Download-Fehler: {str(e)}")
+                error_msg = str(e)
+                logging.error(f"Download-Fehler: {error_msg}")
                 retries += 1
                 if retries >= max_retries:
                     logging.error(f"Maximale Anzahl von Versuchen erreicht für {task.title}")
+
+                    fail_detail = f"download-error:{error_msg}"
 
                     # Try VOE fallback if this is a VOE.sx URL
                     if is_voe:
                         # Use the original URL if we have it
                         url_to_try = original_url if original_url else task.url
                         logging.debug(f"Versuche VOE Fallback mit ursprünglicher URL: {url_to_try}")
-                        if self._try_voe_fallback(url_to_try, task.output_path, task.title):
+                        fallback_success, fallback_detail = self._try_voe_fallback(url_to_try, task.output_path, task.title)
+                        if fallback_success:
                             logging.debug("VOE.sx Fallback erfolgreich, prüfe deutsche Audiospur...")
-                            if self._verify_german_audio(task.output_path, task.title):
+                            lang_ok, lang_detail = self._verify_german_audio(task.output_path, task.title)
+                            final_detail = lang_detail or fallback_detail
+                            task.last_detail = final_detail
+                            task.last_result = lang_ok
+                            if lang_ok:
                                 logging.debug("Download als erfolgreich markiert.")
-                                return True
-                            else:
-                                logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
-                                return False
+                                return True, final_detail
+                            logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
+                            return False, final_detail
 
-                    return False
+                        if fallback_detail:
+                            fail_detail = fallback_detail
 
-        return False
+                    task.last_detail = fail_detail
+                    task.last_result = False
+                    return False, fail_detail
+
+        if task.last_detail is None:
+            task.last_detail = 'download-error:Maximale Versuche erreicht'
+            task.last_result = False
+        return False, task.last_detail
 
     def make_request(self, url: str, retries: int = 3) -> Optional[requests.Response]:
         """Make an HTTP request with retries and error handling (thread-safe)."""
@@ -914,7 +1017,8 @@ class StreamScraper:
                         retry_failed_episodes = []
                         for episode in failed_episodes:
                             logging.info(f"\nWiederhole Download für: {episode.title}")
-                            if not self._download_video(episode, max_retries=3):
+                            success, _ = self._download_video(episode, max_retries=3)
+                            if not success:
                                 retry_failed_episodes.append(episode)
 
                         if retry_failed_episodes:
@@ -1329,31 +1433,87 @@ class StreamScraper:
                 logging.info(f"Bereite vor: {os.path.basename(output_path)}")
 
                 # Hole Video-URLs
+                episode_id = f"S{season_num:02d}E{episode_num:02d}"
                 stream_urls = self.extract_stream_urls(episode_url, self.get_base_url(url))
                 if not stream_urls:
                     logging.warning(f"Keine Video-URLs gefunden für Episode {episode_num}")
                     failed_downloads.append(f"S{season_num:02d}E{episode_num:02d} - {episode_title}")
+                    self._emit_episode_update(
+                        episode_id,
+                        title=episode_title,
+                        progress=0,
+                        mirror=None,
+                        tries=0,
+                        result=False,
+                        msg="Keine Streams gefunden"
+                    )
                     continue
 
                 # Versuche alle Mirrors nacheinander bis Language Guard OK sagt
                 success = False
+                total_mirrors = len(stream_urls)
+                tries = 0
+                detail = None
+
+                self._emit_episode_update(
+                    episode_id,
+                    title=episode_title,
+                    progress=0,
+                    mirror=None,
+                    tries=0,
+                    result=None,
+                    msg="Warte auf Download"
+                )
+
                 for mirror_idx, stream_url in enumerate(stream_urls):
-                    logging.debug(f"Versuche Mirror {mirror_idx + 1}/{len(stream_urls)} für {episode_title}")
+                    tries += 1
+                    logging.debug(f"Versuche Mirror {mirror_idx + 1}/{total_mirrors} für {episode_title}")
+
+                    current_progress = int((mirror_idx / total_mirrors) * 100) if total_mirrors else 0
+                    self._emit_episode_update(
+                        episode_id,
+                        title=episode_title,
+                        progress=current_progress,
+                        mirror=mirror_idx + 1,
+                        tries=tries,
+                        result=None,
+                        msg=f"Versuch {tries} läuft..."
+                    )
+
                     task = DownloadTask(
                         title=episode_title,
                         url=stream_url,
                         output_path=output_path,
                         episode_num=episode_num
                     )
-                    if self._download_video(task, max_retries=3):
+                    download_success, detail = self._download_video(task, max_retries=3)
+                    message = self._format_result_message(detail, download_success)
+                    after_progress = int((tries / total_mirrors) * 100) if total_mirrors else 100
+                    final_progress = 100 if download_success else after_progress
+
+                    self._emit_episode_update(
+                        episode_id,
+                        title=episode_title,
+                        progress=final_progress,
+                        mirror=mirror_idx + 1,
+                        tries=tries,
+                        result=download_success,
+                        msg=message
+                    )
+
+                    if download_success:
                         success = True
                         logging.debug(f"✓ Erfolgreicher Download mit Mirror {mirror_idx + 1}: {episode_title}")
                         break
-                    else:
-                        logging.warning(f"✗ Mirror {mirror_idx + 1} fehlgeschlagen für {episode_title}")
-                
+
+                    logging.warning(f"✗ Mirror {mirror_idx + 1} fehlgeschlagen für {episode_title}")
+
                 if not success:
-                    failed_downloads.append(f"S{season_num:02d}E{episode_num:02d} - {episode_title}")
+                    failure_note = self._format_result_message(detail, False) if detail else ''
+                    if failure_note:
+                        failed_downloads.append(f"S{season_num:02d}E{episode_num:02d} - {episode_title} ({failure_note})")
+                    else:
+                        failed_downloads.append(f"S{season_num:02d}E{episode_num:02d} - {episode_title}")
                     logging.error(f"Alle Mirrors fehlgeschlagen für {episode_title}")
 
             # Zeige fehlgeschlagene Downloads
@@ -1430,9 +1590,12 @@ class StreamScraper:
                         task = future_to_task[future]
                         completed_tasks += 1
                         try:
-                            success = future.result()
+                            success, detail = future.result()
                             status = "Erfolg" if success else "Fehlgeschlagen"
-                            logging.info(f"[{completed_tasks}/{total_tasks}] {task.title}: {status}")
+                            info_msg = status
+                            if detail:
+                                info_msg = f"{status} ({self._format_result_message(detail, success)})"
+                            logging.info(f"[{completed_tasks}/{total_tasks}] {task.title}: {info_msg}")
                         except Exception as e:
                             logging.error(f"[{completed_tasks}/{total_tasks}] {task.title}: Fehler - {str(e)}")
 
@@ -1466,9 +1629,12 @@ class StreamScraper:
                     task = future_to_task[future]
                     completed_tasks += 1
                     try:
-                        success = future.result()
+                        success, detail = future.result()
                         status = "Erfolg" if success else "Fehlgeschlagen"
-                        logging.info(f"[{completed_tasks}/{total_tasks}] {task.title}: {status}")
+                        info_msg = status
+                        if detail:
+                            info_msg = f"{status} ({self._format_result_message(detail, success)})"
+                        logging.info(f"[{completed_tasks}/{total_tasks}] {task.title}: {info_msg}")
                     except Exception as e:
                         logging.error(f"[{completed_tasks}/{total_tasks}] {task.title}: Fehler - {str(e)}")
 
@@ -1515,7 +1681,11 @@ class StreamScraper:
                 title=output_filename
             )
 
-            self._download_video(task)
+            success, detail = self._download_video(task)
+
+            if not success:
+                message = self._format_result_message(detail, False)
+                raise RuntimeError(message)
 
             self.download_status.update(
                 progress=100,
