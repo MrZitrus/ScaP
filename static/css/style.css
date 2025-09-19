@@ -39,18 +39,74 @@
     display: inline-block;
 }
 
-#episode-status-table-wrapper {
+.status-log {
+    max-height: 200px;
+    overflow-y: auto;
+    font-size: 0.9rem;
+}
+
+.status-log .log-entry {
+    border-bottom: 1px solid #eee;
+    padding: 4px 0;
+}
+
+.status-log .log-entry:last-child {
+    border-bottom: none;
+}
+
+.job-progress {
+    font-size: 0.85rem;
+}
+
+.queue-actions .btn {
+    margin-right: 4px;
+}
+
+.history-job-card {
+    border: 1px solid #e5e5e5;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+}
+
+.history-job-card.success {
+    border-left: 4px solid #198754;
+}
+
+.history-job-card.failed {
+    border-left: 4px solid #dc3545;
+}
+
+.history-job-card .job-meta {
+    font-size: 0.85rem;
+    color: #6c757d;
+}
+
+.history-results-table {
+    font-size: 0.85rem;
+}
+
+.history-results-table td,
+.history-results-table th {
+    vertical-align: middle;
+}
+
+.series-detail-season {
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    padding: 12px;
+}
+
+.series-detail-season h6 {
+    margin-bottom: 8px;
+}
+
+.series-detail-episodes {
     max-height: 260px;
     overflow-y: auto;
 }
 
-#episode-status-table th,
-#episode-status-table td {
-    font-size: 0.875rem;
-    white-space: nowrap;
-}
-
-#episode-status-table td:last-child {
-    white-space: normal;
-    min-width: 200px;
+.series-detail-episodes .form-check {
+    margin-bottom: 4px;
 }

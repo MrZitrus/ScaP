@@ -4,13 +4,16 @@ from flask_socketio import SocketIO
 from datetime import datetime
 import os
 import json
+import uuid
+import sys
+import subprocess
+from collections import deque
+from scraper import StreamScraper
+from download_manager import DownloadManager
 import logging
 import threading
-import sqlite3
-import shutil
-from scraper import StreamScraper
 from config_manager import get_config
-from database import get_media_db, reset_media_db
+from database import get_media_db
 from gemini_client import GeminiClient
 
 # Get configuration
@@ -49,6 +52,51 @@ class Episode(db.Model):
     status = db.Column(db.String(50))  # 'pending', 'downloading', 'completed', 'failed'
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+
+
+class DownloadJob(db.Model):
+    __tablename__ = 'download_jobs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    external_id = db.Column(db.String(36), unique=True, nullable=False, default=lambda: str(uuid.uuid4()))
+    url = db.Column(db.String(500), nullable=False)
+    title = db.Column(db.String(255))
+    series_title = db.Column(db.String(255))
+    status = db.Column(db.String(20), default='queued')
+    job_type = db.Column(db.String(20), default='series')
+    progress = db.Column(db.Float, default=0.0)
+    bytes_downloaded = db.Column(db.BigInteger, default=0)
+    bytes_total = db.Column(db.BigInteger, default=0)
+    speed = db.Column(db.Float, default=0.0)
+    eta = db.Column(db.Integer)
+    current_episode_title = db.Column(db.String(255))
+    language_tag = db.Column(db.String(32))
+    result_path = db.Column(db.String(500))
+    error_message = db.Column(db.Text)
+    queue_position = db.Column(db.Integer, default=0)
+    options = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    started_at = db.Column(db.DateTime)
+    finished_at = db.Column(db.DateTime)
+
+
+class DownloadResult(db.Model):
+    __tablename__ = 'download_results'
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_id = db.Column(db.Integer, db.ForeignKey('download_jobs.id'), nullable=False)
+    season_num = db.Column(db.Integer)
+    episode_num = db.Column(db.Integer)
+    title = db.Column(db.String(255))
+    file_path = db.Column(db.String(500))
+    file_size = db.Column(db.BigInteger)
+    language_tag = db.Column(db.String(32))
+    success = db.Column(db.Boolean, default=True)
+    skipped = db.Column(db.Boolean, default=False)
+    error_message = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    job = db.relationship('DownloadJob', backref=db.backref('results', lazy=True, cascade='all, delete-orphan'))
 # Erstelle die Datenbank
 with app.app_context():
     db.create_all()
@@ -63,6 +111,8 @@ scraper = StreamScraper(
     max_parallel_extractions=config.get('download.max_parallel_extractions'),
     socketio=socketio
 )
+
+download_manager = DownloadManager(app, scraper, socketio, db, DownloadJob, DownloadResult, logger)
 
 # Initialisiere den Gemini Client, wenn aktiviert
 gemini_enabled = config.get('gemini.enabled', False)
@@ -109,29 +159,38 @@ def gemini_settings():
 def search():
     query = request.args.get('q', '').strip()
     series_type = request.args.get('type', 'all')
-    include_all = request.args.get('all', 'false').lower() == 'true'
 
-    base_query = Series.query
-    if series_type != 'all':
-        base_query = base_query.filter(Series.type == series_type)
-
-    if query:
-        like_query = f"%{query}%"
-        base_query = base_query.filter(Series.title.ilike(like_query))
-    elif not include_all:
+    if not query:
         return jsonify([])
 
-    results = base_query.order_by(Series.title.asc()).limit(250).all()
+    # Suche in der Datenbank
+    query = f"%{query}%"
+    if series_type == 'all':
+        results = Series.query.filter(Series.title.ilike(query)).all()
+    else:
+        results = Series.query.filter(Series.title.ilike(query), Series.type == series_type).all()
 
-    return jsonify([
-        {
-            'id': s.id,
-            'title': s.title,
-            'url': s.url,
-            'type': s.type
-        }
-        for s in results
-    ])
+    return jsonify([{
+        'id': s.id,
+        'title': s.title,
+        'url': s.url,
+        'type': s.type
+    } for s in results])
+
+
+@app.route('/api/anime/details', methods=['POST'])
+def get_anime_details():
+    data = request.get_json(force=True) or {}
+    url = data.get('url')
+    if not url:
+        return jsonify({'error': 'URL ist erforderlich'}), 400
+    try:
+        details = scraper.get_series_details(url)
+        return jsonify({'status': 'success', 'data': details})
+    except Exception as exc:
+        logger.error(f"Fehler beim Laden der Serien-Details: {exc}", exc_info=True)
+        return jsonify({'error': str(exc)}), 500
+
 
 @app.route('/api/scrape/list', methods=['POST'])
 def scrape_list():
@@ -170,92 +229,48 @@ def scrape_list():
         logger.error(f"Fehler beim Scraping: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-
-@app.route('/api/db/repair', methods=['POST'])
-def repair_database():
-    """Prüft die SQLite-Datenbank und erstellt bei Bedarf eine neue Datei."""
-    db_path = config.get('download.db_path', 'media.db')
-
-    try:
-        if not os.path.exists(db_path):
-            message = f"Datenbank-Datei {db_path} wurde nicht gefunden."
-            logger.warning(message)
-            return jsonify({'status': 'missing', 'message': message}), 404
-
-        connection = sqlite3.connect(db_path)
-        result = connection.execute("PRAGMA integrity_check;").fetchone()
-        connection.close()
-
-        check_status = (result[0] if result else '').strip().lower()
-        if check_status == 'ok':
-            logger.info("Datenbank-Integritätsprüfung erfolgreich: ok")
-            return jsonify({'status': 'ok', 'message': 'Datenbank ist intakt.'})
-
-        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        backup_path = f"{db_path}.corrupt_{timestamp}.bak"
-        shutil.move(db_path, backup_path)
-        logger.warning("Datenbank war beschädigt. Backup gespeichert unter %s", backup_path)
-
-        global media_db
-        media_db = reset_media_db(db_path)
-
-        return jsonify({
-            'status': 'recreated',
-            'message': 'Beschädigte Datenbank wurde ersetzt. Bitte Verzeichnis erneut scannen.',
-            'backup': backup_path
-        })
-    except Exception as exc:
-        logger.error("Fehler bei der Datenbank-Reparatur: %s", exc, exc_info=True)
-        return jsonify({'status': 'error', 'error': str(exc)}), 500
-
 @app.route('/api/download', methods=['POST'])
 def start_download():
-    """Startet den Download einer Serie"""
-    url = request.json.get('url')
+    """Fügt einen neuen Download-Auftrag zur Warteschlange hinzu."""
+    data = request.get_json(force=True)
+    url = (data or {}).get('url')
     if not url:
         return jsonify({'error': 'URL ist erforderlich'}), 400
-
-    try:
-        # Starte den Download im Hintergrund
-        # TODO: Implementiere asynchrones Downloading
-        scraper.start_download(url)
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    series_title = (data or {}).get('title') or url
+    options = (data or {}).get('options') or {}
+    if 'selectedEpisodes' in data:
+        options['selected_episodes'] = data.get('selectedEpisodes')
+    if 'seriesTitle' in data:
+        options['series_title'] = data.get('seriesTitle')
+    job = download_manager.enqueue_job(url, series_title, options=options)
+    return jsonify({'status': 'queued', 'job': download_manager.serialize_job(job)})
 
 @app.route('/download', methods=['POST'])
 def download():
-    """Starte einen Download."""
+    """Legacy Endpoint: enqueued download job based on URL payload."""
     try:
-        url = request.json.get('url')
+        data = request.get_json(force=True)
+        url = (data or {}).get('url')
         logger.debug(f"Download-Anfrage erhalten für URL: {url}")
-
         if not url:
-            logger.error("Keine URL in der Anfrage gefunden")
+            logger.error('Keine URL in der Anfrage gefunden')
             return jsonify({'error': 'URL fehlt'}), 400
-
-        # Prüfe ob bereits ein Download läuft
-        if scraper.download_status.is_downloading:
-            logger.warning("Es läuft bereits ein Download")
-            return jsonify({'error': 'Es läuft bereits ein Download!'}), 409
-
-        # Starte Download im Hintergrund
-        logger.info(f"Starte Download-Thread für URL: {url}")
-        thread = threading.Thread(target=scraper.start_download, args=(url,))
-        thread.daemon = True
-        thread.start()
-
-        return jsonify({'message': 'Download gestartet'})
-
+        options = (data or {}).get('options') or {}
+        if data and 'selectedEpisodes' in data:
+            options['selected_episodes'] = data.get('selectedEpisodes')
+        if data and 'seriesTitle' in data:
+            options['series_title'] = data.get('seriesTitle')
+        job = download_manager.enqueue_job(url, data.get('title') or url, options=options)
+        return jsonify({'status': 'queued', 'job': download_manager.serialize_job(job)})
     except Exception as e:
         logger.error(f"Kritischer Fehler beim Download: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/download/status')
 def download_status():
-    """Hole den aktuellen Download-Status"""
-    status = scraper.download_status.get_status()
-    return jsonify(status)
+    """Hole den aktuellen Download-Status inklusive Warteschlange und Historie."""
+    snapshot = download_manager.get_status_snapshot()
+    return jsonify(snapshot)
 
 @app.route('/api/media/list')
 def get_media_list():
@@ -355,17 +370,102 @@ def reset_session():
 
 @app.route('/api/cancel', methods=['POST'])
 def cancel_download():
-    """Bricht den aktuellen Download ab."""
+    """Bricht einen Download-Auftrag ab."""
+    payload = request.get_json(silent=True) or {}
+    job_id = payload.get('job_id')
+    if not job_id:
+        job_id = download_manager.current_job_id
+        if not job_id:
+            return jsonify({'error': 'Kein aktiver Download'}), 400
+    success, message = download_manager.cancel_job(job_id)
+    status_code = 200 if success else 400
+    return jsonify({'success': success, 'message': message}), status_code
+
+
+
+@app.route('/api/download/queue/pause', methods=['POST'])
+def pause_queue():
+    payload = request.get_json(silent=True) or {}
+    paused = payload.get('paused', True)
+    state = download_manager.toggle_queue_pause(bool(paused))
+    return jsonify({'paused': state})
+
+@app.route('/api/download/jobs', methods=['GET'])
+def list_download_jobs():
+    filter_param = request.args.get('filter', 'all')
+    limit = int(request.args.get('limit', 20))
+    snapshot = download_manager.get_status_snapshot()
+    response = {
+        'active': snapshot.get('active'),
+        'queue': snapshot.get('queue'),
+        'history': snapshot.get('history'),
+    }
+    if filter_param == 'queue':
+        response.pop('history', None)
+    elif filter_param == 'history':
+        response.pop('queue', None)
+    if limit and response.get('history'):
+        response['history'] = response['history'][:limit]
+    return jsonify(response)
+
+
+@app.route('/api/download/jobs/<int:job_id>/pause', methods=['POST'])
+def pause_job(job_id):
+    success, message = download_manager.pause_job(job_id)
+    return jsonify({'success': success, 'message': message}), 200 if success else 400
+
+
+@app.route('/api/download/jobs/<int:job_id>/resume', methods=['POST'])
+def resume_job(job_id):
+    success, message = download_manager.resume_job(job_id)
+    return jsonify({'success': success, 'message': message}), 200 if success else 400
+
+
+@app.route('/api/download/jobs/<int:job_id>/cancel', methods=['POST'])
+def cancel_job(job_id):
+    success, message = download_manager.cancel_job(job_id)
+    return jsonify({'success': success, 'message': message}), 200 if success else 400
+
+
+@app.route('/api/download/results/<int:result_id>/open', methods=['POST'])
+def open_downloaded_file(result_id):
+    result = DownloadResult.query.get(result_id)
+    if not result or not result.file_path:
+        return jsonify({'error': 'Download nicht gefunden'}), 404
+    file_path = result.file_path
+    if not os.path.exists(file_path):
+        return jsonify({'error': 'Datei nicht vorhanden'}), 404
     try:
-        if scraper.download_status.request_cancel():
-            logger.info("Download-Abbruch angefordert")
-            return jsonify({'message': 'Download-Abbruch angefordert'}), 200
+        if os.name == 'nt':
+            os.startfile(file_path)  # type: ignore[attr-defined]
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', file_path])
         else:
-            logger.warning("Kein aktiver Download zum Abbrechen")
-            return jsonify({'error': 'Kein aktiver Download zum Abbrechen'}), 400
-    except Exception as e:
-        logger.error(f"Fehler beim Abbrechen des Downloads: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+            subprocess.Popen(['xdg-open', file_path])
+        return jsonify({'success': True})
+    except Exception as exc:
+        logger.error(f"Fehler beim Öffnen der Datei: {exc}", exc_info=True)
+        return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/download/results/<int:result_id>', methods=['DELETE'])
+def delete_downloaded_file(result_id):
+    result = DownloadResult.query.get(result_id)
+    if not result:
+        return jsonify({'error': 'Download nicht gefunden'}), 404
+    file_path = result.file_path
+    removed = False
+    if file_path and os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+            removed = True
+        except Exception as exc:
+            logger.error(f"Fehler beim Löschen der Datei: {exc}", exc_info=True)
+            return jsonify({'error': str(exc)}), 500
+    with app.app_context():
+        DownloadResult.query.filter_by(id=result_id).delete()
+        db.session.commit()
+    return jsonify({'success': True, 'removed_file': removed})
 
 @app.route('/api/settings/download-dir', methods=['GET', 'POST'])
 def manage_download_dir():
@@ -736,7 +836,8 @@ def manage_language_settings():
             'require_dub': config.get('language.require_dub', True),
             'sample_seconds': config.get('language.sample_seconds', 45),
             'remux_to_de_if_present': config.get('language.remux_to_de_if_present', True),
-            'accept_on_error': config.get('language.accept_on_error', False)
+            'accept_on_error': config.get('language.accept_on_error', False),
+            'verify_with_whisper': config.get('language.verify_with_whisper', True)
         })
     elif request.method == 'POST':
         try:
@@ -757,6 +858,7 @@ def manage_language_settings():
             config.config['language']['sample_seconds'] = data.get('sample_seconds', 45)
             config.config['language']['remux_to_de_if_present'] = data.get('remux_to_de_if_present', True)
             config.config['language']['accept_on_error'] = data.get('accept_on_error', False)
+            config.config['language']['verify_with_whisper'] = data.get('verify_with_whisper', True)
 
             # Speichere die Konfiguration
             with open('config.json', 'w') as f:

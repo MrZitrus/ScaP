@@ -733,10 +733,3 @@ def get_media_db(db_path: str = "media.db") -> MediaDatabase:
     if _media_db is None:
         _media_db = MediaDatabase(db_path)
     return _media_db
-
-
-def reset_media_db(db_path: str = "media.db") -> MediaDatabase:
-    """Erstelle die MediaDatabase neu und ersetze die Singleton-Instanz."""
-    global _media_db
-    _media_db = MediaDatabase(db_path)
-    return _media_db

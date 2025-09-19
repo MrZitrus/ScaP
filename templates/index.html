@@ -48,7 +48,7 @@
                     <div class="col-md-6">
                         <div class="d-flex gap-2 justify-content-md-end justify-content-start mt-2 mt-md-0">
                             <button id="update-db-btn" class="btn btn-primary">Datenbank aktualisieren</button>
-                            <button id="load-aniworld" class="btn btn-secondary">Aniworld-Liste laden</button>
+                            <button id="load-anime-list-btn" class="btn btn-secondary">Aniworld-Liste laden</button>
                         </div>
                     </div>
                 </div>
@@ -56,7 +56,21 @@
                 <div id="search-results" class="list-group mb-4">
                     <!-- Search results will be displayed here -->
                 </div>
-                <div id="aniworld-results" class="mb-4 d-none"></div>
+                <div id="anime-list" class="mb-4 d-none"></div>
+                <div id="series-detail" class="card d-none mb-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span id="series-detail-title"></span>
+                        <button class="btn btn-sm btn-outline-secondary" id="close-series-detail">Schließen</button>
+                    </div>
+                    <div class="card-body" id="series-detail-body"></div>
+                    <div class="card-footer d-flex justify-content-between align-items-center">
+                        <div class="form-check mb-0">
+                            <input class="form-check-input" type="checkbox" value="" id="select-all-episodes">
+                            <label class="form-check-label" for="select-all-episodes">Alle Episoden auswählen</label>
+                        </div>
+                        <button class="btn btn-primary" id="enqueue-selected-btn">Auswahl herunterladen</button>
+                    </div>
+                </div>
             </div>
 
             <!-- Direct Download Tab -->
@@ -74,56 +88,55 @@
 
             <!-- Status Tab -->
             <div class="tab-pane fade" id="status" role="tabpanel" aria-labelledby="status-tab">
-                <div id="download-status" class="card mb-4">
-                    <div class="card-header">
-                        Download Status
+                <div class="card mb-3" id="active-download-card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>Aktiver Download</span>
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button class="btn btn-outline-secondary" id="pause-active-btn">Pause</button>
+                            <button class="btn btn-outline-secondary" id="resume-active-btn">Fortsetzen</button>
+                            <button class="btn btn-outline-danger" id="cancel-active-btn">Abbrechen</button>
+                        </div>
                     </div>
-                    <div class="card-body">
-                        <h5 class="card-title" id="status-title">Kein aktiver Download</h5>
-                        <p class="card-text" id="status-message">-</p>
-                        <div class="progress mb-3" style="display: none;">
-                            <div id="status-progress" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
-                        </div>
-                        <p class="card-text">
-                            <small class="text-muted">
-                                Episode: <span id="status-episode">-</span> / <span id="status-total-episodes">-</span>
-                            </small>
-                        </p>
-                        <div class="d-flex justify-content-between">
-                            <button id="reset-session-btn" class="btn btn-secondary">Session zurücksetzen</button>
-                            <button id="cancel-download-btn" class="btn btn-danger">Download abbrechen</button>
-                        </div>
+                    <div class="card-body" id="active-download-body">
+                        <p class="text-muted mb-1">Kein aktiver Download</p>
                     </div>
                 </div>
 
-                <div class="card" id="episode-status-card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <span>Episodenstatus</span>
-                        <div class="form-check form-switch m-0">
-                            <input class="form-check-input" type="checkbox" id="episode-filter-errors">
-                            <label class="form-check-label" for="episode-filter-errors">Nur Fehler</label>
-                        </div>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h5 class="mb-0">Warteschlange</h5>
+                    <button class="btn btn-sm btn-outline-secondary" id="toggle-queue-btn" data-paused="false">Queue pausieren</button>
+                </div>
+                <div class="table-responsive mb-4" id="queue-table-wrapper">
+                    <table class="table table-sm align-middle" id="queue-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">#</th>
+                                <th scope="col">Titel</th>
+                                <th scope="col">Typ</th>
+                                <th scope="col">Status</th>
+                                <th scope="col">Fortschritt</th>
+                                <th scope="col" class="text-end">Aktionen</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                    <div class="alert alert-info d-none" id="queue-empty">Keine Aufträge in der Warteschlange.</div>
+                </div>
+
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h5 class="mb-0">Verlauf</h5>
+                    <div class="btn-group btn-group-sm" id="history-filter" role="group">
+                        <button type="button" class="btn btn-outline-primary active" data-history-filter="all">Alle</button>
+                        <button type="button" class="btn btn-outline-primary" data-history-filter="completed">Fertig</button>
+                        <button type="button" class="btn btn-outline-primary" data-history-filter="failed">Fehler</button>
                     </div>
-                    <div class="card-body p-0">
-                        <div id="episode-status-table-wrapper" class="table-responsive">
-                            <table class="table table-sm mb-0" id="episode-status-table">
-                                <thead class="table-light">
-                                    <tr>
-                                        <th scope="col">Episode</th>
-                                        <th scope="col">Fortschritt</th>
-                                        <th scope="col">Mirror</th>
-                                        <th scope="col">Versuche</th>
-                                        <th scope="col">Ergebnis</th>
-                                        <th scope="col">Hinweis</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="episode-status-body">
-                                    <tr>
-                                        <td colspan="6" class="text-center text-muted py-3">Noch keine Daten</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
+                </div>
+                <div id="history-container" class="mb-4"></div>
+
+                <div class="card">
+                    <div class="card-header">Log</div>
+                    <div class="card-body">
+                        <div id="status-log" class="status-log"></div>
                     </div>
                 </div>
             </div>
@@ -148,17 +161,58 @@
                     </div>
                 </div>
 
+</form>
+                    </div>
+                </div>
+
+                <div class="card mb-4">
+                    <div class="card-header">Language Guard</div>
+                    <div class="card-body">
+                        <form id="language-settings-form">
+                            <div class="mb-3">
+                                <label for="language-prefer" class="form-label">Bevorzugte Sprachen</label>
+                                <input type="text" class="form-control" id="language-prefer" placeholder="de,deu,ger">
+                                <div class="form-text">Kommagetrennte Liste nach Priorität.</div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="language-require-dub">
+                                        <label class="form-check-label" for="language-require-dub">Nur GerDub akzeptieren</label>
+                                    </div>
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="language-verify-whisper">
+                                        <label class="form-check-label" for="language-verify-whisper">Whisper-Verifikation aktivieren</label>
+                                    </div>
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="language-remux">
+                                        <label class="form-check-label" for="language-remux">Bei deutscher Spur remuxen</label>
+                                    </div>
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="language-accept-error">
+                                        <label class="form-check-label" for="language-accept-error">Bei Fehlern trotzdem akzeptieren</label>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="language-sample-seconds" class="form-label">Whisper Sample Sekunden</label>
+                                    <input type="number" class="form-control" id="language-sample-seconds" min="10" step="5">
+                                </div>
+                            </div>
+                            <div class="text-end">
+                                <button type="submit" class="btn btn-primary mt-3">Speichern</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
                 <div class="card mb-4">
                     <div class="card-header">
                         Datenbank-Verwaltung
                     </div>
                     <div class="card-body">
                         <div class="mb-3">
-                            <div class="btn-group" role="group">
-                                <button id="scan-dir-btn" class="btn btn-primary">Verzeichnis scannen</button>
-                                <button id="repair-db-btn" class="btn btn-warning">Datenbank prüfen</button>
-                                <button id="clear-db-btn" class="btn btn-danger">Datenbank zurücksetzen</button>
-                            </div>
+                            <button id="scan-dir-btn" class="btn btn-primary">Verzeichnis scannen</button>
+                            <button id="clear-db-btn" class="btn btn-danger ms-2">Datenbank zurücksetzen</button>
                         </div>
                         <div id="db-stats" class="mt-3">
                             <h5>Statistiken</h5>

@@ -16,8 +16,9 @@ from datetime import datetime
 from pathlib import Path
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Set
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadCancelled
 from scrapers.voe_fallback import VoeFallbackDownloader
 from database import get_media_db, MediaDatabase
 
@@ -69,81 +70,187 @@ def _assert_ffmpeg():
     os.environ["FFPROBE_PATH"] = ffprobe
 
 class DownloadStatus:
+    '''Thread-safe state tracker for long running downloads.'''
+
     def __init__(self):
-        """Initialisiere den Download-Status mit Thread-sicherem Lock"""
         self.is_downloading = False
         self.current_title = ""
-        self.progress = 0
+        self.current_episode_title = ""
+        self.progress = 0.0
         self.total_episodes = 0
         self.current_episode = 0
         self.status_message = ""
-        self._lock = threading.Lock()  # Thread-sicherer Lock für Statusaktualisierungen
-        self.cancel_requested = False  # Flag für Abbruch-Anforderung
+        self.state = "idle"
+        self.bytes_downloaded = 0
+        self.bytes_total = 0
+        self.speed = 0.0
+        self.eta = None
+        self.job_id = None
+        self.cancel_requested = False
+        self.pause_requested = False
+        self._lock = threading.Lock()
+        self._listener = None
+        self._pause_event = threading.Event()
+        self._pause_event.set()
 
-    def update(self, title="", progress=None, current_episode=None, total_episodes=None, status_message=""):
-        """Aktualisiere den Status thread-sicher"""
-        with self._lock:  # Verwende den Lock, um Race Conditions zu vermeiden
+    def set_listener(self, listener):
+        '''Register a callback that receives status dictionaries.'''
+        with self._lock:
+            self._listener = listener
+
+    def set_job(self, job_id):
+        with self._lock:
+            self.job_id = job_id
+            self._notify()
+
+    def update(self, *, title="", progress=None, current_episode=None, total_episodes=None,
+               status_message="", bytes_downloaded=None, bytes_total=None, speed=None,
+               eta=None, state=None, episode_title=""):
+        with self._lock:
             if title:
                 self.current_title = title
+            if episode_title:
+                self.current_episode_title = episode_title
             if progress is not None:
-                self.progress = progress
+                try:
+                    self.progress = float(progress)
+                except (TypeError, ValueError):
+                    logging.debug("Invalid progress value: %s", progress)
             if current_episode is not None:
                 self.current_episode = current_episode
             if total_episodes is not None:
                 self.total_episodes = total_episodes
             if status_message:
                 self.status_message = status_message
+            if bytes_downloaded is not None:
+                self.bytes_downloaded = max(0, int(bytes_downloaded))
+            if bytes_total is not None:
+                self.bytes_total = max(0, int(bytes_total))
+            if speed is not None:
+                self.speed = float(speed) if speed else 0.0
+            if eta is not None:
+                self.eta = int(eta) if eta else None
+            if state:
+                self.state = state
+        self._notify()
+
+    def start_download(self):
+        with self._lock:
+            self.is_downloading = True
+            self.cancel_requested = False
+            self.pause_requested = False
+            self.progress = 0.0
+            self.current_episode = 0
+            self.bytes_downloaded = 0
+            self.bytes_total = 0
+            self.speed = 0.0
+            self.eta = None
+            self.state = "running"
+            self._pause_event.set()
+        self._notify()
+
+    def finish_download(self, state=None, status_message=None):
+        with self._lock:
+            self.is_downloading = False
+            if status_message:
+                self.status_message = status_message
+            if state:
+                self.state = state
+            elif self.cancel_requested:
+                self.state = "canceled"
+            elif self.state not in ("failed", "canceled"):
+                self.state = "completed"
+            if self.state == "completed":
+                self.progress = 100.0
+            self.cancel_requested = False
+            self.pause_requested = False
+            self._pause_event.set()
+        self._notify()
+
+    def request_cancel(self):
+        with self._lock:
+            if self.is_downloading and not self.cancel_requested:
+                self.cancel_requested = True
+                self.state = "canceling"
+                self._pause_event.set()
+                self._notify()
+                return True
+        return False
+
+    def request_pause(self):
+        with self._lock:
+            if self.is_downloading and not self.pause_requested:
+                self.pause_requested = True
+                self.state = "paused"
+                self._pause_event.clear()
+                self._notify()
+                return True
+        return False
+
+    def resume(self):
+        with self._lock:
+            if self.pause_requested:
+                self.pause_requested = False
+                self.state = "running" if self.is_downloading else "idle"
+                self._pause_event.set()
+                self._notify()
+                return True
+        return False
+
+    def wait_if_paused(self):
+        while True:
+            self._pause_event.wait()
+            with self._lock:
+                if not self.pause_requested:
+                    return
+            time.sleep(0.2)
+
+    def is_cancel_requested(self):
+        with self._lock:
+            return self.cancel_requested
 
     def get_status(self) -> Dict[str, Any]:
-        """Hole den aktuellen Status thread-sicher"""
-        with self._lock:  # Verwende den Lock beim Zugriff auf den Status
+        with self._lock:
             return {
                 'is_downloading': self.is_downloading,
                 'current_title': self.current_title,
+                'current_episode_title': self.current_episode_title,
                 'progress': self.progress,
                 'current_episode': self.current_episode,
                 'total_episodes': self.total_episodes,
                 'status_message': self.status_message,
-                'cancel_requested': self.cancel_requested
+                'cancel_requested': self.cancel_requested,
+                'pause_requested': self.pause_requested,
+                'state': self.state,
+                'bytes_downloaded': self.bytes_downloaded,
+                'bytes_total': self.bytes_total,
+                'speed': self.speed,
+                'eta': self.eta,
+                'job_id': self.job_id
             }
 
-    def start_download(self):
-        """Markiere den Download als gestartet"""
+    def _notify(self):
+        listener = None
         with self._lock:
-            self.is_downloading = True
-            self.progress = 0
-            self.current_episode = 0
-            self.status_message = "Download gestartet"
+            listener = self._listener
+            snapshot = self.get_status()
+        if listener:
+            try:
+                listener(snapshot)
+            except Exception:
+                logging.exception("Download status listener raised an exception")
 
-    def finish_download(self):
-        """Markiere den Download als beendet"""
-        with self._lock:
-            self.is_downloading = False
-            self.progress = 100
-            self.cancel_requested = False
-            self.status_message = "Download abgeschlossen"
 
-    def request_cancel(self):
-        """Fordert den Abbruch des Downloads an"""
-        with self._lock:
-            if self.is_downloading:
-                self.cancel_requested = True
-                self.status_message = "Abbruch angefordert..."
-                return True
-            return False
-
-    def is_cancel_requested(self):
-        """Prüft ob ein Abbruch angefordert wurde"""
-        with self._lock:
-            return self.cancel_requested
 
 class RealDebrid:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.base_url = "https://api.real-debrid.com/rest/1.0"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}"
-        }
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        })
         self.is_premium = self.check_premium()
         if self.is_premium:
             logging.info("Real-Debrid Premium Account aktiv")
@@ -151,80 +258,32 @@ class RealDebrid:
             logging.warning("Real-Debrid Account ist kein Premium-Account")
 
     def check_premium(self) -> bool:
-        """Überprüft ob der Account Premium hat"""
         try:
-            response = requests.get(
-                f"{self.base_url}/user",
-                headers=self.headers
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("premium", 0) > 0
-            return False
-        except Exception as e:
-            logging.error(f"Fehler beim Prüfen des Premium-Status: {str(e)}")
+            response = self.session.get(f"{self.base_url}/user")
+            response.raise_for_status()
+            data = response.json()
+            return bool(data.get("type") == "premium")
+        except Exception as exc:
+            logging.error(f"Real-Debrid Benutzerinfo konnte nicht geladen werden: {exc}")
             return False
 
-    def unrestrict_link(self, link: str, max_retries: int = 3) -> Optional[str]:
-        """Konvertiert einen Hoster-Link in einen direkten Download-Link"""
-        retries = 0
-        while retries < max_retries:
-            try:
-                if retries > 0:
-                    # Exponentielles Backoff: 10s, 20s, 40s...
-                    wait_time = 10 * (2 ** (retries - 1))
-                    logging.info(f"Warte {wait_time}s vor Real-Debrid Versuch {retries + 1}/{max_retries}")
-                    time.sleep(wait_time)
-
-                response = requests.post(
-                    f"{self.base_url}/unrestrict/link",
-                    headers=self.headers,
-                    data={"link": link}
-                )
-
-                if response.status_code == 503:
-                    logging.warning("Real-Debrid Server überlastet (503)")
-                    retries += 1
-                    continue
-
-                if response.status_code == 200:
-                    data = response.json()
-                    download_url = data.get("download")
-                    if download_url:
-                        # Prüfe ob die Download-URL erreichbar ist
-                        head_response = requests.head(download_url, timeout=10)
-                        if head_response.status_code == 200:
-                            return download_url
-                        logging.warning(f"Download-URL nicht erreichbar (Status: {head_response.status_code})")
-                    else:
-                        logging.warning("Keine Download-URL in Real-Debrid Antwort")
-                else:
-                    error_data = None
-                    try:
-                        error_data = response.json()
-                    except:
-                        logging.error(f"Real-Debrid API Fehler: {response.status_code}")
-                        logging.error(f"API Antwort: {response.content}")
-
-                    if error_data and error_data.get("error") == "unavailable_file":
-                        logging.warning("Diese Datei ist bei Real-Debrid nicht verfügbar")
-                        logging.warning("Wechsle zu normalem Download...")
-                        return None
-                    elif error_data:
-                        logging.error(f"Real-Debrid API Fehler: {error_data}")
-
-                retries += 1
-
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Verbindungsfehler zu Real-Debrid: {str(e)}")
-                retries += 1
-                continue
-            except Exception as e:
-                logging.error(f"Unerwarteter Fehler bei Real-Debrid: {str(e)}")
-                retries += 1
-                continue
-
-        return None
+    def unrestrict_link(self, url: str) -> Optional[str]:
+        try:
+            payload = {"link": url}
+            response = self.session.post(f"{self.base_url}/unrestrict/link", data=payload)
+            if response.status_code == 429:
+                logging.warning("Real-Debrid Rate-Limit erreicht")
+                return None
+            response.raise_for_status()
+            data = response.json()
+            direct_link = data.get("download")
+            if not direct_link:
+                logging.warning("Real-Debrid konnte keinen Direktlink erzeugen")
+                return None
+            return direct_link
+        except Exception as exc:
+            logging.error(f"Real-Debrid Fehler: {exc}")
+            return None
 
 @dataclass
 class DownloadTask:
@@ -232,8 +291,15 @@ class DownloadTask:
     output_path: str
     title: str
     episode_num: int = 0
-    last_detail: Optional[str] = None
-    last_result: Optional[bool] = None
+    season_num: int = 0
+    series_title: str = ""
+    episode_url: str = ""
+    language_tag: str = ""
+    job_id: Optional[int] = None
+    last_result: Optional[Dict[str, Any]] = None
+    last_error: Optional[str] = None
+    order_index: int = 0
+    total_count: int = 0
 
     def __str__(self):
         return f"DownloadTask(title={self.title}, episode_num={self.episode_num})"
@@ -354,6 +420,82 @@ class StreamScraper:
         logging.info(f"Using download directory: {self.download_dir}")
 
         self.download_status = DownloadStatus()
+        self.download_status.set_listener(self._on_status_update)
+        self._status_listener = None
+        self._event_listener = None
+        self._results_lock = threading.Lock()
+        self._current_results = []
+        self.current_job_id = None
+        self.current_job_meta = {}
+
+    def set_status_listener(self, listener):
+        """Register external listener for status updates."""
+        self._status_listener = listener
+
+    def set_event_listener(self, listener):
+        """Register external listener for job events."""
+        self._event_listener = listener
+
+    def begin_job(self, job_id, meta=None):
+        """Initialize bookkeeping for a new download job."""
+        self.current_job_id = job_id
+        self.current_job_meta = meta or {}
+        self.download_status.set_job(job_id)
+        with self._results_lock:
+            self._current_results = []
+
+    def finalize_job(self):
+        """Reset job state and return collected results."""
+        with self._results_lock:
+            results = list(self._current_results)
+        self.current_job_id = None
+        self.current_job_meta = {}
+        self.download_status.set_job(None)
+        return results
+
+    def _on_status_update(self, status):
+        """Internal bridge for DownloadStatus notifications."""
+        data = dict(status)
+        if self.current_job_id is not None:
+            data['job_id'] = self.current_job_id
+        if self._status_listener:
+            try:
+                self._status_listener(data)
+            except Exception:
+                logging.exception("Status listener raised an exception")
+        elif self.socketio:
+            self.socketio.emit('status_update', data)
+
+    def _emit_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None):
+        """Notify listeners about job level events."""
+        data = dict(payload or {})
+        if self.current_job_id is not None:
+            data['job_id'] = self.current_job_id
+        data['event'] = event_type
+        if self._event_listener:
+            try:
+                self._event_listener(event_type, data)
+            except Exception:
+                logging.exception("Event listener raised an exception")
+        elif self.socketio:
+            self.socketio.emit(event_type, data)
+
+    def _record_result(self, task: DownloadTask, success: bool, extra: Optional[Dict[str, Any]] = None):
+        """Store episode level result for later history reporting."""
+        result = {
+            'title': task.title,
+            'episode_num': task.episode_num,
+            'season_num': task.season_num,
+            'output_path': task.output_path,
+            'language_tag': task.language_tag,
+            'url': task.episode_url or task.url,
+            'success': success
+        }
+        if extra:
+            result.update(extra)
+        with self._results_lock:
+            self._current_results.append(result)
+        return result
 
     def _load_config(self) -> dict:
         """Lädt die Konfigurationsdatei"""
@@ -489,7 +631,7 @@ class StreamScraper:
             logging.error(f"Fehler beim Folgen des Redirects: {str(e)}")
             return None
 
-    def _try_voe_fallback(self, url, output_path, title) -> tuple[bool, Optional[str]]:
+    def _try_voe_fallback(self, url, output_path, title):
         """
         Try to download a VOE.sx video using the fallback downloader.
 
@@ -499,7 +641,7 @@ class StreamScraper:
             title (str): Title of the video
 
         Returns:
-            Tuple[bool, Optional[str]]: Erfolg und Detailmeldung
+            bool: True if successful, False otherwise
         """
         logging.info(f"Trying VOE.sx fallback downloader for: {url}")
         try:
@@ -512,117 +654,47 @@ class StreamScraper:
 
             if success:
                 logging.info(f"VOE fallback: Download successful! File saved to: {full_path}")
-                return True, None
+                return True
             else:
                 logging.error("VOE fallback: Download failed")
-                return False, "fallback-error:Download fehlgeschlagen"
+                return False
         except Exception as e:
             logging.error(f"VOE fallback: Error - {str(e)}")
-            return False, f"fallback-error:{e}"
+            return False
 
-    def _emit_episode_update(self, episode_id: str, **payload):
-        """Sendet einen WebSocket-Status für eine Episode, falls SocketIO aktiv ist."""
-        if not self.socketio:
-            return
-
-        data = {'episode_id': episode_id}
-        data.update(payload)
-
-        try:
-            self.socketio.emit('episode_update', data)
-        except Exception as exc:
-            logging.debug(f"Konnte episode_update nicht senden ({episode_id}): {exc}")
-
-    def _format_result_message(self, detail: Optional[str], success: bool) -> str:
-        """Wandelt technische Detailcodes in nutzerfreundliche Meldungen um."""
-        if not detail:
-            return "Erfolgreich" if success else "Fehlgeschlagen"
-
-        normalized = detail.lower()
-
-        success_map = {
-            'tag-match': 'DE-Tag gefunden',
-            'tag-match-remuxed': 'Remux auf deutsche Spur',
-            'tag-match-subs': 'nur GerSub',
-            'accepted-after-remux': 'Remux + Whisper bestätigt',
-        }
-        failure_map = {
-            'no-de-dub': 'Keine deutsche Tonspur',
-            'subs-only-de': 'Nur Untertitel gefunden',
-            'language-guard-missing': 'Language Guard nicht verfügbar',
-        }
-
-        if success and normalized in success_map:
-            return success_map[normalized]
-        if not success and normalized in failure_map:
-            return failure_map[normalized]
-
-        if normalized.startswith('content-match:'):
-            lang = normalized.split(':', 1)[1] or '?'
-            return f"Whisper: {lang}"
-        if normalized.startswith('mismatch:'):
-            lang = normalized.split(':', 1)[1] or 'unbekannt'
-            return f"Spracherkennung: {lang}"
-        if normalized.startswith('download-error:'):
-            return normalized.split(':', 1)[1].strip() or 'Download-Fehler'
-        if normalized.startswith('ffprobe-error:'):
-            return normalized.split(':', 1)[1].strip() or 'ffprobe-Fehler'
-        if normalized.startswith('language-guard-error:'):
-            return normalized.split(':', 1)[1].strip() or 'Language Guard Fehler'
-        if normalized.startswith('fallback-error:'):
-            return normalized.split(':', 1)[1].strip() or 'Fallback-Fehler'
-
-        return detail
-
-    def _verify_german_audio(self, video_path: str, title: str) -> tuple[bool, Optional[str]]:
+    def _verify_german_audio(self, video_path: str, title: str) -> bool:
         """
-        Prüft, ob die heruntergeladene Datei deutsche Audiospur oder Untertitel hat.
-
+        Prüft, ob die heruntergeladene Datei deutsche Audiospur hat.
+        
+        Args:
+            video_path (str): Pfad zur Video-Datei
+            title (str): Titel für Logging
+            
         Returns:
-            Tuple[bool, Optional[str]]: Ergebnis und Detailmeldung
+            bool: True wenn deutsche Audiospur vorhanden, False sonst
         """
         try:
-            from language_guard import (
-                verify_language,
-                ffprobe_streams,
-                audio_lang_indices,
-                has_subtitles_in_lang,
-            )
-
+            from language_guard import verify_language
+            
             # Hole Language Guard Konfiguration
             lang_cfg = self.config.get('language', {})
-            prefer = set(map(str.lower, lang_cfg.get('prefer', ['de', 'deu', 'ger'])))
+            prefer = set(map(str.lower, lang_cfg.get('prefer', ['de','deu','ger'])))
             require_dub = lang_cfg.get('require_dub', True)
             sample_seconds = lang_cfg.get('sample_seconds', 45)
             remux = lang_cfg.get('remux_to_de_if_present', True)
-
+            
             logging.info(f"Prüfe deutsche Audiospur für: {title}")
-
-            try:
-                meta = ffprobe_streams(video_path)
-            except Exception as meta_err:
-                logging.error(f"ffprobe Fehler für {title}: {meta_err}")
-                return False, f"ffprobe-error:{meta_err}"
-
-            audio_matches = audio_lang_indices(meta, prefer)
-            subtitle_matches = has_subtitles_in_lang(meta, prefer)
-
-            if not audio_matches and subtitle_matches:
-                logging.info(f"{title}: deutsche Untertitel erkannt, akzeptiere GerSub.")
-                return True, "tag-match-subs"
-
             ok, detail, fixed_path = verify_language(
                 video_path,
                 prefer_tags=prefer,
                 require_dub=require_dub,
                 sample_seconds=sample_seconds,
-                remux=remux,
-                meta=meta,
+                remux=remux
             )
-
+            
             if ok:
                 logging.info(f"✓ Deutsche Audiospur bestätigt für {title}: {detail}")
-
+                
                 # Falls eine remuxte Datei erstellt wurde, ersetze die ursprüngliche
                 if fixed_path and fixed_path != video_path:
                     try:
@@ -635,46 +707,47 @@ class StreamScraper:
                             logging.info(f"Datei erfolgreich remuxed: {video_path}")
                     except Exception as e:
                         logging.error(f"Fehler beim Ersetzen der remuxten Datei: {e}")
+                
+                return True
+            else:
+                logging.warning(f"✗ Keine deutsche Audiospur gefunden für {title}: {detail}")
+                
+                # Unbrauchbare Datei über temporären Pfad löschen
+                try:
+                    target_path = Path(video_path)
+                    if target_path.exists():
+                        reject_path = target_path.with_suffix(target_path.suffix + '.reject')
+                        if reject_path.exists():
+                            reject_path.unlink(missing_ok=True)
+                        target_path.replace(reject_path)
+                        try:
+                            reject_path.unlink(missing_ok=True)
+                        except Exception as cleanup_err:
+                            logging.warning(f"Temporäre Reject-Datei konnte nicht entfernt werden: {cleanup_err}")
+                        logging.info(f"Datei ohne deutsche Audiospur gelöscht: {video_path}")
+                except Exception as e:
+                    logging.error(f"Fehler beim Löschen der Datei: {e}")
 
-                return True, detail
 
-            logging.warning(f"✗ Keine deutsche Audiospur gefunden für {title}: {detail}")
-
-            # Unbrauchbare Datei über temporären Pfad löschen
-            try:
-                target_path = Path(video_path)
-                if target_path.exists():
-                    reject_path = target_path.with_suffix(target_path.suffix + '.reject')
-                    if reject_path.exists():
-                        reject_path.unlink(missing_ok=True)
-                    target_path.replace(reject_path)
-                    try:
-                        reject_path.unlink(missing_ok=True)
-                    except Exception as cleanup_err:
-                        logging.warning(f"Temporäre Reject-Datei konnte nicht entfernt werden: {cleanup_err}")
-                    logging.info(f"Datei ohne deutsche Audiospur gelöscht: {video_path}")
-            except Exception as e:
-                logging.error(f"Fehler beim Löschen der Datei: {e}")
-
-            return False, detail
-
+                return False
+                
         except ImportError:
             logging.warning("Language Guard nicht verfügbar - überspringe Sprachprüfung")
+            # Konfigurierbar: bei fehlender Language Guard akzeptieren oder ablehnen
             accept_on_error = self.config.get('language.accept_on_error', False)
-            return accept_on_error, 'language-guard-missing'
+            return accept_on_error
         except Exception as e:
             logging.error(f"Fehler bei der Sprachprüfung für {title}: {e}")
+            # Konfigurierbar: bei Fehlern akzeptieren oder ablehnen
             accept_on_error = self.config.get('language.accept_on_error', False)
-            return accept_on_error, f"language-guard-error:{e}"
+            return accept_on_error
 
-    def _download_video(self, task: DownloadTask, max_retries: int = 3) -> tuple[bool, Optional[str]]:
+    def _download_video(self, task: DownloadTask, max_retries: int = 3) -> bool:
         """Video von VOE.sx oder maxfinishseveral.com herunterladen"""
         retries = 0
         rd_failed = False  # Real-Debrid Fehlschlag
         original_url = None  # Store the original URL before Real-Debrid
-
-        task.last_detail = None
-        task.last_result = None
+        total_tasks = task.total_count or self.current_job_meta.get('total_episodes', 1) or 1
 
         # Sicherstellen, dass task.url ein String ist
         if isinstance(task.url, list):
@@ -683,14 +756,10 @@ class StreamScraper:
                 logging.debug(f"Verwende erste URL aus Liste: {task.url}")
             else:
                 logging.error(f"Keine gültige URL gefunden für {task.title}")
-                task.last_detail = 'download-error:Keine gültige URL'
-                task.last_result = False
-                return False, task.last_detail
+                return False
         elif not isinstance(task.url, str):
             logging.error(f"Ungültiger URL-Typ für {task.title}: {type(task.url)}")
-            task.last_detail = 'download-error:Ungültiger URL-Typ'
-            task.last_result = False
-            return False, task.last_detail
+            return False
 
         # Check if this is a VOE.sx URL
         parsed_url = urlparse(task.url)
@@ -702,12 +771,13 @@ class StreamScraper:
             logging.debug(f"Saved original VOE.sx URL for potential fallback: {original_url}")
 
         while retries < max_retries:
+            self.download_status.wait_if_paused()
+            task.last_error = None
             # Check if cancel was requested
             if self.download_status.is_cancel_requested():
                 logging.info(f"Download abgebrochen für: {task.title}")
-                task.last_detail = 'download-error:Abgebrochen'
-                task.last_result = False
-                return False, task.last_detail
+                task.last_error = 'Abgebrochen'
+                return False
 
             try:
                 if retries > 0:
@@ -736,29 +806,42 @@ class StreamScraper:
                         # If this is a VOE.sx URL and we have the original URL, try fallback right away
                         if is_voe and original_url:
                             logging.info("Real-Debrid fehlgeschlagen für VOE.sx Link, versuche direkte Fallback-Methode...")
-                            fallback_success, fallback_detail = self._try_voe_fallback(original_url, task.output_path, task.title)
-                            if fallback_success:
+                            if self._try_voe_fallback(original_url, task.output_path, task.title):
                                 logging.debug("VOE.sx Fallback erfolgreich, prüfe deutsche Audiospur...")
-                                lang_ok, lang_detail = self._verify_german_audio(task.output_path, task.title)
-                                final_detail = lang_detail or fallback_detail
-                                task.last_detail = final_detail
-                                task.last_result = lang_ok
-                                if lang_ok:
-                                    return True, final_detail
-                                logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
-                                return False, final_detail
-                            elif fallback_detail:
-                                task.last_detail = fallback_detail
-                                task.last_result = False
+                                if self._verify_german_audio(task.output_path, task.title):
+                                    return True
+                                else:
+                                    logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
+                                    task.last_error = 'Sprachprüfung fehlgeschlagen'
+                                    return False
 
                         continue
 
                 # Download mit yt-dlp
+                def progress_hook(progress):
+                    self.download_status.wait_if_paused()
+                    if self.download_status.is_cancel_requested():
+                        raise DownloadCancelled('Benutzerabbruch')
+                    status = progress.get('status')
+                    bytes_downloaded = progress.get('downloaded_bytes', 0)
+                    total_bytes = progress.get('total_bytes') or progress.get('total_bytes_estimate') or 0
+                    speed = progress.get('speed') or 0.0
+                    eta = progress.get('eta')
+                    if total_bytes and total_bytes > 0:
+                        episode_fraction = bytes_downloaded / total_bytes
+                    else:
+                        episode_fraction = 0.0
+                    overall_progress = ((task.order_index - 1) + episode_fraction) / (total_tasks or 1) * 100
+                    status_message = f"Lade {task.title}" if status == 'downloading' else f"Fertig: {task.title}"
+                    self.download_status.update(episode_title=task.title, current_episode=task.order_index, total_episodes=total_tasks, progress=overall_progress, bytes_downloaded=bytes_downloaded, bytes_total=total_bytes, speed=speed, eta=eta, status_message=status_message, state='running')
+
                 ydl_opts = {
                     'format': 'best',
                     'outtmpl': task.output_path,
                     'quiet': True,
                     'no_warnings': True,
+                    'progress_hooks': [progress_hook],
+                    'noprogress': True,
                     'extractor_args': {'youtube': {'player_skip': ['js', 'configs', 'webpage']}},
                 }
 
@@ -766,66 +849,61 @@ class StreamScraper:
                     with YoutubeDL(ydl_opts) as ydl:
                         ydl.download([task.url])
                     logging.info(f"Download erfolgreich: {task.title}")
-                    
+
                     # Language Guard: Prüfe deutsche Audiospur
-                    lang_ok, lang_detail = self._verify_german_audio(task.output_path, task.title)
-                    task.last_detail = lang_detail
-                    task.last_result = lang_ok
-                    if lang_ok:
-                        return True, lang_detail
+                    if self._verify_german_audio(task.output_path, task.title):
+                        file_size = os.path.getsize(task.output_path) if os.path.exists(task.output_path) else 0
+                        task.last_result = {'file_size': file_size}
+                        return True
+                    else:
+                        # Datei entspricht nicht den Sprachanforderungen
+                        logging.warning(f"Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
+                        task.last_error = 'Sprachprüfung fehlgeschlagen'
+                        return False
 
-                    # Datei entspricht nicht den Sprachanforderungen
-                    logging.warning(f"Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
-                    return False, lang_detail
-
+                except DownloadCancelled:
+                    logging.info(f"Download durch Benutzer gestoppt: {task.title}")
+                    task.last_error = 'Abgebrochen'
+                    return False
                 except Exception as e:
                     error_msg = str(e)
+                    task.last_error = error_msg
                     if "Unsupported URL" in error_msg:
                         self.log_unsupported_url(task.url, error_msg)
                     logging.error(f"yt-dlp Fehler: {error_msg}")
                     if "Video unavailable" in error_msg:
                         logging.warning("Video nicht mehr verfügbar")
+                        task.last_error = 'Video nicht mehr verfügbar'
                         return False
                     raise  # Re-raise für andere Fehler
 
             except Exception as e:
-                error_msg = str(e)
-                logging.error(f"Download-Fehler: {error_msg}")
+                task.last_error = str(e)
+                logging.error(f"Download-Fehler: {str(e)}")
                 retries += 1
                 if retries >= max_retries:
+                    task.last_error = 'Maximale Anzahl von Versuchen erreicht'
                     logging.error(f"Maximale Anzahl von Versuchen erreicht für {task.title}")
-
-                    fail_detail = f"download-error:{error_msg}"
 
                     # Try VOE fallback if this is a VOE.sx URL
                     if is_voe:
                         # Use the original URL if we have it
                         url_to_try = original_url if original_url else task.url
                         logging.debug(f"Versuche VOE Fallback mit ursprünglicher URL: {url_to_try}")
-                        fallback_success, fallback_detail = self._try_voe_fallback(url_to_try, task.output_path, task.title)
-                        if fallback_success:
+                        if self._try_voe_fallback(url_to_try, task.output_path, task.title):
                             logging.debug("VOE.sx Fallback erfolgreich, prüfe deutsche Audiospur...")
-                            lang_ok, lang_detail = self._verify_german_audio(task.output_path, task.title)
-                            final_detail = lang_detail or fallback_detail
-                            task.last_detail = final_detail
-                            task.last_result = lang_ok
-                            if lang_ok:
+                            if self._verify_german_audio(task.output_path, task.title):
                                 logging.debug("Download als erfolgreich markiert.")
-                                return True, final_detail
-                            logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
-                            return False, final_detail
+                                file_size = os.path.getsize(task.output_path) if os.path.exists(task.output_path) else 0
+                                task.last_result = {'file_size': file_size, 'fallback': 'voe'}
+                                return True
+                            else:
+                                logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
+                                return False
 
-                        if fallback_detail:
-                            fail_detail = fallback_detail
+                    return False
 
-                    task.last_detail = fail_detail
-                    task.last_result = False
-                    return False, fail_detail
-
-        if task.last_detail is None:
-            task.last_detail = 'download-error:Maximale Versuche erreicht'
-            task.last_result = False
-        return False, task.last_detail
+        return False
 
     def make_request(self, url: str, retries: int = 3) -> Optional[requests.Response]:
         """Make an HTTP request with retries and error handling (thread-safe)."""
@@ -1017,8 +1095,7 @@ class StreamScraper:
                         retry_failed_episodes = []
                         for episode in failed_episodes:
                             logging.info(f"\nWiederhole Download für: {episode.title}")
-                            success, _ = self._download_video(episode, max_retries=3)
-                            if not success:
+                            if not self._download_video(episode, max_retries=3):
                                 retry_failed_episodes.append(episode)
 
                         if retry_failed_episodes:
@@ -1056,94 +1133,224 @@ class StreamScraper:
 
         logging.info("\nSerien-Scraping abgeschlossen.")
 
-    def process_series(self, url: str):
-        """Verarbeitet eine Serie mit paralleler Staffel-Verarbeitung"""
+    def process_series(self, url: str, job_options: Optional[Dict[str, Any]] = None) -> bool:
+        job_options = job_options or {}
         try:
             logging.info(f"Starte Verarbeitung von {url}")
-            # Rufe die Startseite der Serie ab
             response = self.make_request(url)
             if not response:
+                logging.error("Konnte Serienseite nicht abrufen")
+                self._emit_event('job_error', {'error': 'Serienseite konnte nicht geladen werden', 'url': url})
                 return False
-
             soup = BeautifulSoup(response.text, 'html.parser')
             base_url = self.get_base_url(url)
-
-            # Extrahiere Seriennamen
-            series_name = self._extract_series_name(url)
+            series_name = job_options.get('title') or self._extract_series_name(url)
             series_path = self._get_series_path(series_name, url)
-
-            # Erstelle Serienverzeichnis
             os.makedirs(series_path, exist_ok=True)
-
-            # Hole alle Staffeln
             seasons = self._extract_seasons(soup, base_url, url)
             if not seasons:
-                logging.warning(f"Keine Staffeln für {series_name} gefunden")
+                message = f"Keine Staffeln für {series_name} gefunden"
+                logging.warning(message)
+                self._emit_event('job_error', {'error': message, 'series': series_name, 'url': url})
                 return False
-
-            # Sortiere Staffeln nach Nummer
             seasons.sort(key=lambda s: s.get('number', 0))
-            logging.info(f"\nGefunden: {len(seasons)} Staffeln für {series_name}")
-
-            # Verarbeite Staffeln parallel
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_parallel_extractions) as executor:
-                future_to_season = {
-                    executor.submit(
-                        self._process_season,
-                        season['url'],
-                        series_name,
-                        season['number'],
-                        self._get_series_path(series_name, url)
-                    ): season['number']
-                    for season in seasons
-                }
-
-                # Verarbeite die Ergebnisse
-                completed_seasons = 0
-                new_episodes_found = False
-                for future in concurrent.futures.as_completed(future_to_season):
-                    season_num = future_to_season[future]
-                    completed_seasons += 1
+            season_episodes: Dict[int, List[Dict[str, Any]]] = {}
+            max_workers = min(len(seasons), max(1, self.max_parallel_extractions))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {executor.submit(self._extract_episodes, season['url'], base_url): season for season in seasons}
+                for future in concurrent.futures.as_completed(future_map):
+                    season = future_map[future]
+                    season_num = season['number']
                     try:
-                        success = future.result()
-                        if success:
-                            new_episodes_found = True
-                        status = "Erfolg" if success else "Fehlgeschlagen oder keine neuen Episoden"
-                        logging.info(f"[{completed_seasons}/{len(seasons)}] Staffel {season_num}: {status}")
-                    except Exception as e:
-                        logging.error(f"[{completed_seasons}/{len(seasons)}] Staffel {season_num}: Fehler - {str(e)}")
-
-            logging.info(f"\nAlle Staffeln von {series_name} wurden verarbeitet")
-
-            # Aktualisiere Jellyfin wenn aktiviert
-            if self.jellyfin:
-                logging.info("Starte Jellyfin Bibliotheks-Scan...")
-                self.jellyfin.refresh_libraries()
-                logging.info("Jellyfin Bibliotheks-Scan wurde gestartet")
-
-            return True
-
+                        episodes = future.result()
+                    except Exception as exc:
+                        logging.error(f"Fehler beim Laden der Episodenliste für Staffel {season_num}: {exc}")
+                        episodes = []
+                    season_episodes[season_num] = episodes
+            selection_map = self._build_selection_map(job_options)
+            total_tasks = 0
+            for season in seasons:
+                season_num = season['number']
+                episodes = season_episodes.get(season_num, [])
+                total_tasks += self._count_eligible_episodes(episodes, selection_map.get(season_num))
+            self.current_job_meta['total_episodes'] = total_tasks
+            self.current_job_meta['processed'] = 0
+            self.current_job_meta['completed'] = 0
+            if total_tasks == 0:
+                message = "Keine passenden Episoden gefunden"
+                logging.info(message)
+                self.download_status.update(progress=0.0, total_episodes=0, status_message=message, state='idle')
+                self._emit_event('job_noop', {'message': message, 'series': series_name})
+                return False
+            self.download_status.update(total_episodes=total_tasks, status_message=f"{total_tasks} Episoden geplant", state='running')
+            self._emit_event('job_plan_ready', {'total_episodes': total_tasks, 'series': series_name, 'season_count': len(seasons)})
+            overall_success = True
+            for season in seasons:
+                season_num = season['number']
+                episodes = season_episodes.get(season_num, [])
+                part_success = self._process_season(
+                    season_url=season['url'],
+                    series_name=series_name,
+                    season_num=season_num,
+                    series_path=series_path,
+                    job_options=job_options,
+                    episodes=episodes,
+                    selected_episode_numbers=selection_map.get(season_num),
+                    total_tasks=total_tasks
+                )
+                overall_success = overall_success and part_success
+                if self.download_status.is_cancel_requested():
+                    logging.info("Download wurde abgebrochen - restliche Staffeln werden übersprungen")
+                    break
+            return overall_success and not self.download_status.is_cancel_requested()
         except Exception as e:
-            logging.error(f"Fehler beim Verarbeiten der Serie: {str(e)}")
+            logging.error(f"Fehler beim Verarbeiten der Serie: {str(e)}", exc_info=True)
+            self._emit_event('job_error', {'error': str(e), 'url': url})
             return False
+    def _build_selection_map(self, job_options: Dict[str, Any]) -> Dict[int, Optional[Set[int]]]:
+        """Normalize episode selection payload into a season->episodes mapping."""
+        selections = job_options.get('selected_episodes')
+        if not selections:
+            return {}
+        normalized: Dict[int, Optional[Set[int]]] = {}
+        if isinstance(selections, list):
+            for entry in selections:
+                if not isinstance(entry, dict):
+                    continue
+                season = entry.get('season')
+                episodes = entry.get('episodes')
+                try:
+                    season_num = int(season)
+                except (TypeError, ValueError):
+                    continue
+                if episodes in (None, 'all', 'ALL', '*'):
+                    normalized[season_num] = None
+                elif isinstance(episodes, list):
+                    try:
+                        normalized[season_num] = {int(e) for e in episodes}
+                    except ValueError:
+                        normalized[season_num] = None
+                else:
+                    try:
+                        normalized[season_num] = {int(e) for e in str(episodes).split(',') if e}
+                    except ValueError:
+                        normalized[season_num] = None
+        elif isinstance(selections, dict):
+            for key, value in selections.items():
+                try:
+                    season_num = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if value in (None, 'all', 'ALL', '*'):
+                    normalized[season_num] = None
+                elif isinstance(value, list):
+                    try:
+                        normalized[season_num] = {int(e) for e in value}
+                    except ValueError:
+                        normalized[season_num] = None
+                else:
+                    try:
+                        normalized[season_num] = {int(e) for e in str(value).split(',') if e}
+                    except ValueError:
+                        normalized[season_num] = None
+        return normalized
 
-    def start_download(self, url: str):
-        """Haupteinstiegspunkt für den Download."""
+    def _count_eligible_episodes(self, episodes: List[Dict[str, Any]], selected_numbers: Optional[Set[int]]) -> int:
+        if not episodes:
+            return 0
+        lang_config = self.config.get("scraper", {}).get("language_preference", {})
+        allow_german_sub = lang_config.get('allow_german_sub', True)
+        count = 0
+        for episode in episodes:
+            number = episode.get('number')
+            if number is None:
+                continue
+            try:
+                number = int(number)
+            except (TypeError, ValueError):
+                continue
+            if selected_numbers is not None and number not in selected_numbers:
+                continue
+            has_dub = episode.get('has_german_dub', False)
+            has_sub = episode.get('has_german_sub', False)
+            if has_dub or (allow_german_sub and has_sub):
+                count += 1
+        return count
+    def get_series_details(self, url: str) -> Dict[str, Any]:
+        """Return a structured overview of seasons and episodes for a given series URL."""
+        response = self.make_request(url)
+        if not response:
+            raise ValueError('Serienseite konnte nicht geladen werden')
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        base_url = self.get_base_url(url)
+        series_name = self._extract_series_name(url)
+        seasons = self._extract_seasons(soup, base_url, url)
+        details = {
+            'title': series_name,
+            'url': url,
+            'seasons': []
+        }
+        for season in seasons:
+            episodes = self._extract_episodes(season['url'], base_url)
+            season_entry = {
+                'season': season['number'],
+                'url': season['url'],
+                'episodes': []
+            }
+            for episode in episodes:
+                season_entry['episodes'].append({
+                    'number': episode.get('number'),
+                    'title': episode.get('title'),
+                    'url': episode.get('url'),
+                    'has_german_dub': episode.get('has_german_dub', False),
+                    'has_german_sub': episode.get('has_german_sub', False)
+                })
+            details['seasons'].append(season_entry)
+        return details
+
+
+    def start_download(self, url: str, job_options: Optional[Dict[str, Any]] = None):
+        """Haupteinstiegspunkt für den Download mit optionalen Job-Metadaten."""
         if self.download_status.is_downloading:
             raise Exception("Es läuft bereits ein Download!")
 
+        job_options = job_options or {}
+        job_id = job_options.get('job_id')
+        self.begin_job(job_id, job_options)
+        display_title = job_options.get('title') or job_options.get('series_name') or url
+        state = 'failed'
+        message = ''
+        success = False
+        results: List[Dict[str, Any]] = []
+
         try:
             self.download_status.start_download()
-            self.download_status.update(status_message="Starte Download...")
-            self.process_series(url)
+            self.download_status.update(title=display_title, status_message="Starte Download...", state='running')
+            self._emit_event('job_started', {'title': display_title, 'url': url, 'job_id': job_id})
+            success = self.process_series(url, job_options=job_options)
+            if self.download_status.cancel_requested:
+                state = 'canceled'
+                message = 'Download abgebrochen'
+            elif success:
+                state = 'completed'
+                message = 'Download abgeschlossen'
+            else:
+                state = 'failed'
+                message = 'Download teilweise fehlgeschlagen'
+            self.download_status.finish_download(state=state, status_message=message)
         except Exception as e:
-            self.download_status.update(status_message=f"Fehler: {str(e)}")
-            # Versuche Session zurückzusetzen bei Fehlern
-            self.reset_session()
+            message = str(e)
+            state = 'failed'
+            logging.error(f"Fehler beim Download: {message}", exc_info=True)
+            self.download_status.finish_download(state=state, status_message=message)
+            self._emit_event('job_error', {'error': message, 'url': url, 'job_id': job_id})
             raise
         finally:
-            self.download_status.finish_download()
+            results = self.finalize_job()
+            self._emit_event('job_finished', {'state': state, 'success': state == 'completed', 'message': message, 'results': results, 'job_id': job_id})
 
+        return {'success': state == 'completed', 'state': state, 'message': message, 'results': results}
     def reset_session(self):
         """Reset die Session für neue Downloads, ohne andere Funktionen zu beeinflussen."""
         try:
@@ -1161,6 +1368,7 @@ class StreamScraper:
 
             # Setze Download-Status zurück
             self.download_status = DownloadStatus()
+            self.download_status.set_listener(self._on_status_update)
 
             logging.info("Session erfolgreich zurückgesetzt")
             return True
@@ -1249,86 +1457,43 @@ class StreamScraper:
         pass
 
     def get_anime_list(self) -> List[Dict[str, str]]:
-        """Scrape die Liste aller Animes von aniworld.to mit Retry-Logik."""
-        list_url = "https://aniworld.to/animes"
-        selectors = [
-            'ul li a[href^="/anime/stream/"]',
-            'a[href^="/anime/stream/"][title]',
-            '.seriesList a[href^="/anime/stream/"]',
-        ]
-        max_retries = 3
-        last_error: Optional[Exception] = None
+        """Scrape die Liste aller Animes von aniworld.to"""
+        url = "https://aniworld.to/animes"
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                logging.debug(f"Hole Anime-Liste (Versuch {attempt}/{max_retries}) von {list_url}")
-                response = self.session.get(list_url, timeout=15)
-                response.raise_for_status()
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()  # Wirft Fehler bei HTTP-Statuscode >= 400
 
-                soup = BeautifulSoup(response.text, 'html.parser')
-                anime_list: List[Dict[str, Any]] = []
-                seen_urls: set[str] = set()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            anime_list = []
 
-                for selector in selectors:
-                    for link in soup.select(selector):
-                        href = link.get('href', '').strip()
-                        if not href:
-                            continue
+            # Finde alle Anime-Links in allen Genre-Kategorien
+            for link in soup.select('ul li a[href^="/anime/stream/"]'):
+                title = link.text.strip()
+                if 'Stream anschauen' in title:
+                    title = title.replace(' Stream anschauen', '')
+                url = 'https://aniworld.to' + link.get('href', '')
 
-                        full_url = urljoin("https://aniworld.to", href)
-                        if full_url in seen_urls:
-                            continue
+                # Extrahiere alternative Titel falls vorhanden
+                alt_titles = []
+                if link.has_attr('data-alternative-title'):
+                    alt_titles = link.get('data-alternative-title', '').split(', ')
 
-                        title = (
-                            link.get('title')
-                            or link.get('data-title')
-                            or link.get_text(strip=True)
-                            or ''
-                        ).strip()
-                        if not title:
-                            continue
-
-                        if 'Stream anschauen' in title:
-                            title = title.replace(' Stream anschauen', '').strip()
-
-                        alt_titles: List[str] = []
-                        alt_attr = link.get('data-alternative-title') or link.get('data-alt-titles')
-                        if alt_attr:
-                            alt_titles = [alt.strip() for alt in alt_attr.split(',') if alt.strip()]
-
+                if title and url:  # Nur hinzufügen wenn Titel und URL vorhanden
+                    # Prüfe ob der Anime bereits in der Liste ist (Duplikate vermeiden)
+                    if not any(anime['url'] == url for anime in anime_list):
                         anime_list.append({
                             'title': title,
-                            'url': full_url,
+                            'url': url,
                             'alternative_titles': alt_titles,
-                            'type': 'anime',
+                            'type': 'anime'
                         })
-                        seen_urls.add(full_url)
 
-                if anime_list:
-                    logging.info(f"Gefunden: {len(anime_list)} Animes")
-                else:
-                    logging.warning("Keine Animes auf der Seite gefunden. Möglicherweise hat sich die Struktur geändert.")
-
-                return anime_list
-            except Exception as error:  # noqa: BLE001 - wir wollen alle Fehler loggen
-                last_error = error
-                logging.warning(
-                    "Fehler beim Laden der Anime-Liste (Versuch %s/%s): %s",
-                    attempt,
-                    max_retries,
-                    error,
-                )
-                if attempt < max_retries:
-                    delay = 1.5 * attempt
-                    logging.debug(f"Warte {delay:.1f}s vor erneutem Versuch...")
-                    time.sleep(delay)
-
-        logging.error(
-            "Fehler beim Scrapen der Anime-Liste nach %s Versuchen: %s",
-            max_retries,
-            last_error,
-        )
-        return []
+            logging.info(f"Gefunden: {len(anime_list)} Animes")
+            return anime_list
+        except Exception as e:
+            logging.error(f"Fehler beim Scrapen der Anime-Liste: {str(e)}")
+            return []
 
     def get_series_list(self) -> List[Dict[str, str]]:
         """Scrape die Liste aller Serien von s.to"""
@@ -1373,204 +1538,189 @@ class StreamScraper:
         os.makedirs(series_path, exist_ok=True)
         return series_path
 
-    def _process_season(self, url: str, series_name: str, season_num: int, series_path: str) -> bool:
-        """Verarbeitet eine einzelne Staffel. Gibt True zurück wenn neue Episoden gefunden wurden."""
+    def _process_season(
+        self,
+        season_url: str,
+        series_name: str,
+        season_num: int,
+        series_path: str,
+        job_options: Dict[str, Any],
+        episodes: List[Dict[str, Any]],
+        selected_episode_numbers: Optional[Set[int]],
+        total_tasks: int
+    ) -> bool:
         try:
-            # Verwende die erweiterte Episode-Extraktions-Methode
-            episodes = self._extract_episodes(url, self.get_base_url(url))
-
             if not episodes:
                 logging.warning(f"Keine Episoden in Staffel {season_num} gefunden")
                 return False
 
-            # Erstelle Staffel-Verzeichnis
             season_dir = os.path.join(series_path, f"Staffel {season_num}")
             os.makedirs(season_dir, exist_ok=True)
-
-            # Hole Spracheinstellungen aus der Konfiguration
-            lang_config = self.config.get("scraper", {}).get("language_preference", {})
-            prefer_german_dub = lang_config.get("prefer_german_dub", True)  # Bevorzuge deutschen Ton
-            allow_german_sub = lang_config.get("allow_german_sub", True)    # Erlaube deutschen Untertitel als Fallback
-
-            # Prüfe welche Episoden neu sind
-            new_episodes = []
-            skipped_count = 0
-            skipped_no_german_count = 0
+            base_url = self.get_base_url(season_url)
+            lang_config = self.config.get('scraper', {}).get('language_preference', {})
+            allow_german_sub = lang_config.get('allow_german_sub', True)
+            season_success = True
 
             for episode in episodes:
-                episode_num = episode["number"]
-                episode_url = episode["url"]
-                episode_title = episode["title"]
-                has_german_dub = episode.get("has_german_dub", False)
-                has_german_sub = episode.get("has_german_sub", False)
+                self.download_status.wait_if_paused()
+                if self.download_status.is_cancel_requested():
+                    break
 
-                # Entscheide basierend auf Spracheinstellungen
+                episode_num = episode.get('number')
+                if episode_num is None:
+                    continue
+                try:
+                    episode_num = int(episode_num)
+                except (TypeError, ValueError):
+                    continue
+
+                if selected_episode_numbers is not None and episode_num not in selected_episode_numbers:
+                    continue
+
+                episode_title = episode.get('title') or f"Episode {episode_num}"
+                episode_url = episode.get('url')
+                has_dub = episode.get('has_german_dub', False)
+                has_sub = episode.get('has_german_sub', False)
+
                 should_download = False
-                lang_tag = ""
-
-                if has_german_dub:
-                    # Deutschen Ton immer herunterladen wenn verfügbar
+                language_tag = ''
+                if has_dub:
                     should_download = True
-                    lang_tag = "[GerDub]"
-                elif has_german_sub and allow_german_sub:
-                    # Deutschen Untertitel nur herunterladen, wenn erlaubt und kein deutscher Ton verfügbar
+                    language_tag = '[GerDub]'
+                elif allow_german_sub and has_sub:
                     should_download = True
-                    lang_tag = "[GerSub]"
+                    language_tag = '[GerSub]'
 
                 if not should_download:
-                    skipped_no_german_count += 1
-                    logging.info(f"Überspringe Episode ohne deutsche Tonspur/Untertitel: S{season_num:02d}E{episode_num:02d} - {episode_title}")
+                    self._emit_event('episode_skipped_language', {
+                        'season_num': season_num,
+                        'episode_num': episode_num,
+                        'title': episode_title,
+                        'has_german_dub': has_dub,
+                        'has_german_sub': has_sub
+                    })
                     continue
 
-                # Erstelle Dateinamen mit Sprach-Tag
-                filename = f"S{season_num:02d}E{episode_num:02d} - {episode_title} {lang_tag}.mp4"
+                filename = f"S{season_num:02d}E{episode_num:02d} - {episode_title} {language_tag}.mp4"
                 filename = self._sanitize_filename(filename)
                 output_path = os.path.join(season_dir, filename)
-
-                # Überspringe bereits heruntergeladene Episoden
-                if os.path.exists(output_path):
-                    skipped_count += 1
-                    continue
-
-                # Prüfe auch, ob eine Version ohne Tag existiert
                 filename_no_tag = f"S{season_num:02d}E{episode_num:02d} - {episode_title}.mp4"
                 filename_no_tag = self._sanitize_filename(filename_no_tag)
                 output_path_no_tag = os.path.join(season_dir, filename_no_tag)
 
-                if os.path.exists(output_path_no_tag):
-                    # Wenn eine Version ohne Tag existiert, umbenennen statt neu herunterladen
-                    logging.info(f"Datei ohne Sprach-Tag gefunden, benenne um: {filename_no_tag} -> {filename}")
+                if os.path.exists(output_path_no_tag) and not os.path.exists(output_path):
                     try:
                         os.rename(output_path_no_tag, output_path)
-                        skipped_count += 1
-                        continue
-                    except Exception as e:
-                        logging.error(f"Fehler beim Umbenennen: {str(e)}")
+                        logging.info(f"Bestehende Datei angepasst: {os.path.basename(output_path)}")
+                    except Exception as rename_error:
+                        logging.error(f"Fehler beim Umbenennen bestehender Datei: {rename_error}")
 
-                new_episodes.append((episode_num, episode_url, episode_title, output_path))
-
-            total_episodes = len(episodes)
-            if not new_episodes:
-                german_dub_count = sum(1 for ep in episodes if ep.get("has_german_dub", False))
-                german_sub_count = sum(1 for ep in episodes if ep.get("has_german_sub", False))
-
-                if german_dub_count == 0 and (not allow_german_sub or german_sub_count == 0):
-                    logging.info(f"Keine Episoden mit deutscher Tonspur/Untertitel in Staffel {season_num} gefunden")
-                else:
-                    logging.info(f"Alle verfügbaren Episoden mit deutscher Tonspur/Untertitel bereits heruntergeladen")
-
-                return False
-
-            logging.info(f"Gefunden: {total_episodes} Episoden in Staffel {season_num}")
-            logging.info(f"Davon mit deutschem Ton: {sum(1 for ep in episodes if ep.get('has_german_dub', False))}")
-            logging.info(f"Davon mit deutschem Untertitel: {sum(1 for ep in episodes if ep.get('has_german_sub', False))}")
-            logging.info(f"Überspringe {skipped_count} existierende Episoden")
-            logging.info(f"Überspringe {skipped_no_german_count} Episoden ohne deutsche Tonspur/Untertitel")
-            logging.info(f"Lade {len(new_episodes)} neue Episoden herunter")
-
-            # Erstelle Download-Tasks für neue Episoden
-            download_tasks = []
-            failed_downloads = []
-
-            for episode_num, episode_url, episode_title, output_path in new_episodes:
-                logging.info(f"Bereite vor: {os.path.basename(output_path)}")
-
-                # Hole Video-URLs
-                episode_id = f"S{season_num:02d}E{episode_num:02d}"
-                stream_urls = self.extract_stream_urls(episode_url, self.get_base_url(url))
-                if not stream_urls:
-                    logging.warning(f"Keine Video-URLs gefunden für Episode {episode_num}")
-                    failed_downloads.append(f"S{season_num:02d}E{episode_num:02d} - {episode_title}")
-                    self._emit_episode_update(
-                        episode_id,
-                        title=episode_title,
-                        progress=0,
-                        mirror=None,
-                        tries=0,
-                        result=False,
-                        msg="Keine Streams gefunden"
-                    )
-                    continue
-
-                # Versuche alle Mirrors nacheinander bis Language Guard OK sagt
-                success = False
-                total_mirrors = len(stream_urls)
-                tries = 0
-                detail = None
-
-                self._emit_episode_update(
-                    episode_id,
+                order_index = self.current_job_meta.get('processed', 0) + 1
+                task = DownloadTask(
                     title=episode_title,
-                    progress=0,
-                    mirror=None,
-                    tries=0,
-                    result=None,
-                    msg="Warte auf Download"
+                    url='',
+                    output_path=output_path,
+                    episode_num=episode_num,
+                    season_num=season_num,
+                    series_title=series_name,
+                    episode_url=episode_url,
+                    language_tag=language_tag,
+                    job_id=self.current_job_id,
+                    order_index=order_index,
+                    total_count=total_tasks
                 )
 
-                for mirror_idx, stream_url in enumerate(stream_urls):
-                    tries += 1
-                    logging.debug(f"Versuche Mirror {mirror_idx + 1}/{total_mirrors} für {episode_title}")
+                if os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+                    result = self._record_result(task, True, {'skipped': True, 'file_size': file_size})
+                    self._emit_event('episode_skipped_existing', result)
+                    self.current_job_meta['completed'] = self.current_job_meta.get('completed', 0) + 1
+                    processed = self.current_job_meta.get('processed', 0) + 1
+                    self.current_job_meta['processed'] = processed
+                    total = self.current_job_meta.get('total_episodes', total_tasks)
+                    progress = (processed / total) * 100 if total else 0.0
+                    status_message = f"{processed}/{total} Episoden verarbeitet" if total else 'Episode übersprungen'
+                    self.download_status.update(progress=progress, current_episode=processed, total_episodes=total, status_message=status_message)
+                    continue
 
-                    current_progress = int((mirror_idx / total_mirrors) * 100) if total_mirrors else 0
-                    self._emit_episode_update(
-                        episode_id,
-                        title=episode_title,
-                        progress=current_progress,
-                        mirror=mirror_idx + 1,
-                        tries=tries,
-                        result=None,
-                        msg=f"Versuch {tries} läuft..."
-                    )
+                if not episode_url:
+                    task.last_error = 'Episode URL fehlt'
+                    self._record_result(task, False, {'error': task.last_error})
+                    self._emit_event('episode_failed', {'season_num': season_num, 'episode_num': episode_num, 'title': episode_title, 'error': task.last_error})
+                    season_success = False
+                    processed = self.current_job_meta.get('processed', 0) + 1
+                    self.current_job_meta['processed'] = processed
+                    total = self.current_job_meta.get('total_episodes', total_tasks)
+                    progress = (processed / total) * 100 if total else 0.0
+                    self.download_status.update(progress=progress, current_episode=processed, total_episodes=total, status_message='Episode übersprungen')
+                    continue
 
-                    task = DownloadTask(
-                        title=episode_title,
-                        url=stream_url,
-                        output_path=output_path,
-                        episode_num=episode_num
-                    )
-                    download_success, detail = self._download_video(task, max_retries=3)
-                    message = self._format_result_message(detail, download_success)
-                    after_progress = int((tries / total_mirrors) * 100) if total_mirrors else 100
-                    final_progress = 100 if download_success else after_progress
+                stream_urls = self.extract_stream_urls(episode_url, base_url)
+                if not stream_urls:
+                    task.last_error = 'Keine Video-URLs gefunden'
+                    self._record_result(task, False, {'error': task.last_error})
+                    self._emit_event('episode_failed', {'season_num': season_num, 'episode_num': episode_num, 'title': episode_title, 'error': task.last_error})
+                    season_success = False
+                    processed = self.current_job_meta.get('processed', 0) + 1
+                    self.current_job_meta['processed'] = processed
+                    total = self.current_job_meta.get('total_episodes', total_tasks)
+                    progress = (processed / total) * 100 if total else 0.0
+                    self.download_status.update(progress=progress, current_episode=processed, total_episodes=total, status_message='Keine Streams gefunden')
+                    continue
 
-                    self._emit_episode_update(
-                        episode_id,
-                        title=episode_title,
-                        progress=final_progress,
-                        mirror=mirror_idx + 1,
-                        tries=tries,
-                        result=download_success,
-                        msg=message
-                    )
-
-                    if download_success:
-                        success = True
-                        logging.debug(f"✓ Erfolgreicher Download mit Mirror {mirror_idx + 1}: {episode_title}")
+                mirror_success = False
+                for mirror_index, stream_url in enumerate(stream_urls, start=1):
+                    self.download_status.wait_if_paused()
+                    if self.download_status.is_cancel_requested():
                         break
 
-                    logging.warning(f"✗ Mirror {mirror_idx + 1} fehlgeschlagen für {episode_title}")
-
-                if not success:
-                    failure_note = self._format_result_message(detail, False) if detail else ''
-                    if failure_note:
-                        failed_downloads.append(f"S{season_num:02d}E{episode_num:02d} - {episode_title} ({failure_note})")
+                    task.url = stream_url
+                    self.download_status.update(
+                        episode_title=episode_title,
+                        current_episode=order_index,
+                        total_episodes=total_tasks,
+                        status_message=f"Lade {episode_title} (Mirror {mirror_index}/{len(stream_urls)})",
+                        state='running'
+                    )
+                    mirror_success = self._download_video(task, max_retries=3)
+                    if mirror_success:
+                        file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+                        extra_data = dict(task.last_result or {})
+                        extra_data.setdefault('file_size', file_size)
+                        extra_data['mirror'] = mirror_index
+                        result = self._record_result(task, True, extra_data)
+                        self._emit_event('episode_downloaded', result)
+                        task.last_result = None
+                        self.current_job_meta['completed'] = self.current_job_meta.get('completed', 0) + 1
+                        break
                     else:
-                        failed_downloads.append(f"S{season_num:02d}E{episode_num:02d} - {episode_title}")
-                    logging.error(f"Alle Mirrors fehlgeschlagen für {episode_title}")
+                        error_message = task.last_error or 'Unbekannter Fehler'
+                        self._emit_event('mirror_failed', {'season_num': season_num, 'episode_num': episode_num, 'title': episode_title, 'mirror_index': mirror_index, 'error': error_message})
 
-            # Zeige fehlgeschlagene Downloads
-            if failed_downloads:
-                logging.warning("\nFehlgeschlagene Downloads:")
-                for failed in failed_downloads:
-                    logging.warning(f"- {failed}")
+                if not mirror_success:
+                    if self.download_status.is_cancel_requested():
+                        season_success = False
+                    else:
+                        season_success = False
+                        error_message = task.last_error or 'Alle Mirrors fehlgeschlagen'
+                        self._record_result(task, False, {'error': error_message})
+                        self._emit_event('episode_failed', {'season_num': season_num, 'episode_num': episode_num, 'title': episode_title, 'error': error_message})
 
-            return True
+                processed = self.current_job_meta.get('processed', 0) + 1
+                self.current_job_meta['processed'] = processed
+                total = self.current_job_meta.get('total_episodes', total_tasks)
+                progress = (processed / total) * 100 if total else 0.0
+                status_message = f"{processed}/{total} Episoden verarbeitet" if total else 'Fortschritt aktualisiert'
+                self.download_status.update(progress=progress, current_episode=processed, total_episodes=total, status_message=status_message)
 
+                if self.download_status.is_cancel_requested():
+                    break
+
+            return season_success
         except Exception as e:
-            logging.error(f"Fehler beim Verarbeiten von Staffel {season_num}: {str(e)}")
+            logging.error(f"Fehler beim Verarbeiten von Staffel {season_num}: {str(e)}", exc_info=True)
+            self._emit_event('season_error', {'season': season_num, 'series': series_name, 'error': str(e)})
             return False
-
     def get_base_url(self, url: str) -> str:
         """Extrahiert die Basis-URL aus der gegebenen URL."""
         parsed = urlparse(url)
@@ -1633,12 +1783,9 @@ class StreamScraper:
                         task = future_to_task[future]
                         completed_tasks += 1
                         try:
-                            success, detail = future.result()
+                            success = future.result()
                             status = "Erfolg" if success else "Fehlgeschlagen"
-                            info_msg = status
-                            if detail:
-                                info_msg = f"{status} ({self._format_result_message(detail, success)})"
-                            logging.info(f"[{completed_tasks}/{total_tasks}] {task.title}: {info_msg}")
+                            logging.info(f"[{completed_tasks}/{total_tasks}] {task.title}: {status}")
                         except Exception as e:
                             logging.error(f"[{completed_tasks}/{total_tasks}] {task.title}: Fehler - {str(e)}")
 
@@ -1672,12 +1819,9 @@ class StreamScraper:
                     task = future_to_task[future]
                     completed_tasks += 1
                     try:
-                        success, detail = future.result()
+                        success = future.result()
                         status = "Erfolg" if success else "Fehlgeschlagen"
-                        info_msg = status
-                        if detail:
-                            info_msg = f"{status} ({self._format_result_message(detail, success)})"
-                        logging.info(f"[{completed_tasks}/{total_tasks}] {task.title}: {info_msg}")
+                        logging.info(f"[{completed_tasks}/{total_tasks}] {task.title}: {status}")
                     except Exception as e:
                         logging.error(f"[{completed_tasks}/{total_tasks}] {task.title}: Fehler - {str(e)}")
 
@@ -1724,11 +1868,7 @@ class StreamScraper:
                 title=output_filename
             )
 
-            success, detail = self._download_video(task)
-
-            if not success:
-                message = self._format_result_message(detail, False)
-                raise RuntimeError(message)
+            self._download_video(task)
 
             self.download_status.update(
                 progress=100,

@@ -6,1128 +6,999 @@ const searchInput = document.getElementById('search-input');
 const searchType = document.getElementById('search-type');
 const searchResults = document.getElementById('search-results');
 const updateDbBtn = document.getElementById('update-db-btn');
-const loadAniworldBtn = document.getElementById('load-aniworld');
-const aniworldResults = document.getElementById('aniworld-results');
+const loadAnimeListBtn = document.getElementById('load-anime-list-btn');
+const animeListContainer = document.getElementById('anime-list');
+const seriesDetailCard = document.getElementById('series-detail');
+const seriesDetailTitle = document.getElementById('series-detail-title');
+const seriesDetailBody = document.getElementById('series-detail-body');
+const closeSeriesDetailBtn = document.getElementById('close-series-detail');
+const enqueueSelectedBtn = document.getElementById('enqueue-selected-btn');
+const selectAllEpisodesCheckbox = document.getElementById('select-all-episodes');
 const voeUrlInput = document.getElementById('voe-url');
 const voeFilenameInput = document.getElementById('voe-filename');
 const voeDownloadBtn = document.getElementById('voe-download-btn');
 const resetSessionBtn = document.getElementById('reset-session-btn');
-const cancelDownloadBtn = document.getElementById('cancel-download-btn');
 
-// Settings elements
 const downloadDirForm = document.getElementById('download-dir-form');
 const downloadDirInput = document.getElementById('download-dir');
 const currentDownloadDir = document.getElementById('current-download-dir');
 const scanDirBtn = document.getElementById('scan-dir-btn');
 const clearDbBtn = document.getElementById('clear-db-btn');
-const repairDbBtn = document.getElementById('repair-db-btn');
 const dbStats = document.getElementById('db-stats');
+const languageForm = document.getElementById('language-settings-form');
+const languagePreferInput = document.getElementById('language-prefer');
+const languageRequireDubInput = document.getElementById('language-require-dub');
+const languageVerifyWhisperInput = document.getElementById('language-verify-whisper');
+const languageRemuxInput = document.getElementById('language-remux');
+const languageAcceptErrorInput = document.getElementById('language-accept-error');
+const languageSampleSecondsInput = document.getElementById('language-sample-seconds');
 
-// Library elements
 const librarySearch = document.getElementById('library-search');
 const libraryType = document.getElementById('library-type');
 const libraryContent = document.getElementById('library-content');
 const refreshLibraryBtn = document.getElementById('refresh-library-btn');
 
-// Status elements
-const statusTitle = document.getElementById('status-title');
-const statusMessage = document.getElementById('status-message');
-const statusProgress = document.getElementById('status-progress');
-const statusEpisode = document.getElementById('status-episode');
-const statusTotalEpisodes = document.getElementById('status-total-episodes');
-const downloadStatus = document.getElementById('download-status');
-const episodeStatusTableBody = document.getElementById('episode-status-body');
-const episodeFilterErrors = document.getElementById('episode-filter-errors');
+const activeDownloadBody = document.getElementById('active-download-body');
+const pauseActiveBtn = document.getElementById('pause-active-btn');
+const resumeActiveBtn = document.getElementById('resume-active-btn');
+const cancelActiveBtn = document.getElementById('cancel-active-btn');
+const queueTable = document.getElementById('queue-table');
+const queueTableBody = queueTable ? queueTable.querySelector('tbody') : null;
+const queueEmptyAlert = document.getElementById('queue-empty');
+const toggleQueueBtn = document.getElementById('toggle-queue-btn');
+const historyContainer = document.getElementById('history-container');
+const historyFilterGroup = document.getElementById('history-filter');
+const statusLog = document.getElementById('status-log');
 
-// Variables
+let latestSnapshot = null;
+let historyFilter = 'all';
+let queuePaused = false;
 let searchTimeout = null;
-let isDownloading = false;
-let episodeStatus = new Map();
-let wasDownloading = false;
+let currentSeriesDetail = null;
+let selectedEpisodes = {};
 
-// Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
-    // Live search with debounce
-    searchInput.addEventListener('input', handleSearchInput);
-
-    // Type filter change
-    searchType.addEventListener('change', () => {
-        if (searchInput.value.trim().length > 0) {
-            performSearch(searchInput.value.trim(), searchType.value);
-        }
-    });
-
-    // Update database button
-    updateDbBtn.addEventListener('click', updateDatabase);
-
-    // Load Aniworld list
-    if (loadAniworldBtn) {
-        loadAniworldBtn.addEventListener('click', loadAniworldList);
+    if (searchInput) {
+        searchInput.addEventListener('input', handleSearchInput);
+    }
+    if (searchType) {
+        searchType.addEventListener('change', () => {
+            if (searchInput && searchInput.value.trim().length > 0) {
+                performSearch(searchInput.value.trim(), searchType.value);
+            }
+        });
+    }
+    if (updateDbBtn) {
+        updateDbBtn.addEventListener('click', updateDatabase);
+    }
+    if (loadAnimeListBtn) {
+        loadAnimeListBtn.addEventListener('click', loadAniworldList);
+    }
+    if (voeDownloadBtn) {
+        voeDownloadBtn.addEventListener('click', startVoeDownload);
+    }
+    if (resetSessionBtn) {
+        resetSessionBtn.addEventListener('click', resetSession);
+    }
+    if (pauseActiveBtn) {
+        pauseActiveBtn.addEventListener('click', () => handleActiveJobAction('pause'));
+    }
+    if (resumeActiveBtn) {
+        resumeActiveBtn.addEventListener('click', () => handleActiveJobAction('resume'));
+    }
+    if (cancelActiveBtn) {
+        cancelActiveBtn.addEventListener('click', () => handleActiveJobAction('cancel'));
+    }
+    if (toggleQueueBtn) {
+        toggleQueueBtn.addEventListener('click', toggleQueueState);
+    }
+    if (queueTableBody) {
+        queueTableBody.addEventListener('click', handleQueueTableClick);
+    }
+    if (historyContainer) {
+        historyContainer.addEventListener('click', handleHistoryActionClick);
+    }
+    if (historyFilterGroup) {
+        historyFilterGroup.addEventListener('click', handleHistoryFilterClick);
+    }
+    if (closeSeriesDetailBtn) {
+        closeSeriesDetailBtn.addEventListener('click', hideSeriesDetail);
+    }
+    if (enqueueSelectedBtn) {
+        enqueueSelectedBtn.addEventListener('click', enqueueSelectedEpisodes);
+    }
+    if (selectAllEpisodesCheckbox) {
+        selectAllEpisodesCheckbox.addEventListener('change', handleSelectAllEpisodes);
+    }
+    if (downloadDirForm) {
+        downloadDirForm.addEventListener('submit', saveDownloadDirectory);
+    }
+    if (scanDirBtn) {
+        scanDirBtn.addEventListener('click', scanDirectory);
+    }
+    if (clearDbBtn) {
+        clearDbBtn.addEventListener('click', clearDatabase);
+    }
+    if (languageForm) {
+        languageForm.addEventListener('submit', saveLanguageSettings);
+    }
+    if (librarySearch) {
+        librarySearch.addEventListener('input', handleLibrarySearch);
+    }
+    if (libraryType) {
+        libraryType.addEventListener('change', () => {
+            if (librarySearch && librarySearch.value.trim().length > 0) {
+                filterLibraryContent(librarySearch.value.trim(), libraryType.value);
+            } else {
+                loadLibraryContent();
+            }
+        });
+    }
+    if (refreshLibraryBtn) {
+        refreshLibraryBtn.addEventListener('click', loadLibraryContent);
     }
 
-    // VOE.sx download button
-    voeDownloadBtn.addEventListener('click', startVoeDownload);
+    socket.on('status_update', handleStatusUpdate);
+    socket.on('queue_update', handleQueueUpdate);
+    socket.on('job_event', handleJobEvent);
 
-    // Reset session button
-    resetSessionBtn.addEventListener('click', resetSession);
-
-    // Cancel download button
-    cancelDownloadBtn.addEventListener('click', cancelDownload);
-
-    if (episodeFilterErrors) {
-        episodeFilterErrors.addEventListener('change', renderEpisodeTable);
-    }
-
-    // Check download status on page load
     checkDownloadStatus();
-
-    // Load download directory
     loadDownloadDirectory();
-
-    // Load database statistics
     loadDatabaseStats();
-
-    // Load library content
     loadLibraryContent();
-
-    // Settings event listeners
-    downloadDirForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        updateDownloadDirectory();
-    });
-
-    scanDirBtn.addEventListener('click', scanDirectory);
-    clearDbBtn.addEventListener('click', clearDatabase);
-
-    if (repairDbBtn) {
-        repairDbBtn.addEventListener('click', repairDatabase);
-    }
-
-    // Library event listeners
-    librarySearch.addEventListener('input', handleLibrarySearch);
-    libraryType.addEventListener('change', () => {
-        if (librarySearch.value.trim().length > 0) {
-            filterLibraryContent(librarySearch.value.trim(), libraryType.value);
-        } else {
-            loadLibraryContent();
-        }
-    });
-
-    refreshLibraryBtn.addEventListener('click', loadLibraryContent);
-
-    // Socket.IO event listeners
-    socket.on('connect', () => {
-        console.log('Connected to server');
-    });
-
-    socket.on('status_update', updateStatusDisplay);
-    socket.on('episode_update', handleEpisodeUpdate);
+    loadLanguageSettings();
 });
 
-// Functions
+function handleStatusUpdate(snapshot) {
+    latestSnapshot = snapshot;
+    if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'queue_paused')) {
+        queuePaused = !!snapshot.queue_paused;
+    }
+    updateStatusDisplay(snapshot);
+}
 
-/**
- * Handle search input with debounce
- */
+function handleQueueUpdate(data) {
+    if (!data) return;
+    if (Object.prototype.hasOwnProperty.call(data, 'queue_paused')) {
+        queuePaused = !!data.queue_paused;
+        updateQueueToggleButton();
+    }
+    if (data.queue) {
+        renderQueue(data.queue);
+    }
+    if (data.history) {
+        renderHistory(data.history);
+    }
+    if (data.active && latestSnapshot) {
+        latestSnapshot.active = data.active;
+        renderActiveJob(data.active, latestSnapshot.status || {});
+    }
+}
+
+function handleJobEvent(event) {
+    if (!statusLog || !event) return;
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    const time = new Date().toLocaleTimeString();
+    const title = event.title || event.current_episode_title || event.series_title || '';
+    const message = event.error || event.message || '';
+    entry.textContent = `[${time}] ${event.event || 'info'} ${title} ${message}`.trim();
+    statusLog.prepend(entry);
+    while (statusLog.children.length > 100) {
+        statusLog.removeChild(statusLog.lastChild);
+    }
+}
+
+function updateStatusDisplay(snapshot) {
+    if (!snapshot) return;
+    const status = snapshot.status || {};
+    if (Object.prototype.hasOwnProperty.call(snapshot, 'queue_paused')) {
+        queuePaused = !!snapshot.queue_paused;
+    }
+    updateQueueToggleButton();
+    renderActiveJob(snapshot.active || null, status);
+    renderQueue(snapshot.queue || []);
+    renderHistory(snapshot.history || []);
+}
+
+function renderActiveJob(activeJob, status) {
+    if (!activeDownloadBody) return;
+    if (!activeJob) {
+        activeDownloadBody.innerHTML = '<p class="text-muted mb-1">Kein aktiver Download</p>';
+        if (pauseActiveBtn) pauseActiveBtn.disabled = true;
+        if (resumeActiveBtn) resumeActiveBtn.disabled = true;
+        if (cancelActiveBtn) cancelActiveBtn.disabled = true;
+        return;
+    }
+    const progress = Math.round(status.progress ?? activeJob.progress ?? 0);
+    const bytesDownloaded = formatBytes(status.bytes_downloaded ?? activeJob.bytes_downloaded ?? 0);
+    const bytesTotal = formatBytes(status.bytes_total ?? activeJob.bytes_total ?? 0);
+    const speed = formatSpeed(status.speed ?? activeJob.speed ?? 0);
+    const eta = formatEta(status.eta);
+    const currentEpisode = status.current_episode ?? activeJob.current_episode ?? '-';
+    const totalEpisodes = status.total_episodes ?? activeJob.total_episodes ?? '-';
+    const message = status.status_message || activeJob.error_message || 'Wartet...';
+    const languageTag = status.language_tag || activeJob.language_tag || '';
+    activeDownloadBody.innerHTML = `
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <div>
+                <h5 class="mb-1">${escapeHtml(activeJob.series_title || activeJob.title || activeJob.url)}</h5>
+                <div class="text-muted job-meta">${escapeHtml(message)}</div>
+            </div>
+            <span class="badge bg-secondary text-uppercase">${escapeHtml(status.state || activeJob.status || 'running')}</span>
+        </div>
+        <div class="progress mb-2">
+            <div class="progress-bar" role="progressbar" style="width: ${progress}%" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100">${progress}%</div>
+        </div>
+        <div class="job-progress d-flex justify-content-between"><span>Episoden: ${currentEpisode} / ${totalEpisodes}</span><span>${bytesDownloaded} / ${bytesTotal}</span></div>
+        <div class="job-progress d-flex justify-content-between text-muted"><span>Sprache: ${languageTag || '-'}</span><span>Geschwindigkeit: ${speed} • ETA: ${eta}</span></div>
+    `;
+    const isPaused = (status.state || activeJob.status) === 'paused';
+    if (pauseActiveBtn) pauseActiveBtn.disabled = isPaused;
+    if (resumeActiveBtn) resumeActiveBtn.disabled = !isPaused;
+    if (cancelActiveBtn) cancelActiveBtn.disabled = false;
+}
+
+function renderQueue(queue) {
+    if (!queueTableBody || !queueEmptyAlert) return;
+    queueTableBody.innerHTML = '';
+    if (!queue || queue.length === 0) {
+        queueEmptyAlert.classList.remove('d-none');
+        return;
+    }
+    queueEmptyAlert.classList.add('d-none');
+    queue.forEach((job, index) => {
+        const row = document.createElement('tr');
+        const progress = Math.round(job.progress ?? 0);
+        row.innerHTML = `
+            <td>${index + 1}</td>
+            <td><div class="fw-semibold">${escapeHtml(job.series_title || job.title || job.url)}</div><div class="text-muted small">${escapeHtml(job.url)}</div></td>
+            <td>${escapeHtml(job.job_type || 'series')}</td>
+            <td>${escapeHtml(job.status)}</td>
+            <td>
+                <div class="progress" style="height: 6px;">
+                    <div class="progress-bar" role="progressbar" style="width: ${progress}%" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
+            </td>
+            <td class="text-end queue-actions">${renderQueueActions(job)}</td>
+        `;
+        queueTableBody.appendChild(row);
+    });
+}
+
+function renderQueueActions(job) {
+    const actions = [];
+    if (job.status === 'paused') {
+        actions.push(`<button class="btn btn-sm btn-outline-success" data-action="resume" data-job-id="${job.id}">Fortsetzen</button>`);
+    } else {
+        actions.push(`<button class="btn btn-sm btn-outline-secondary" data-action="pause" data-job-id="${job.id}">Pause</button>`);
+    }
+    actions.push(`<button class="btn btn-sm btn-outline-danger" data-action="cancel" data-job-id="${job.id}">Abbrechen</button>`);
+    return actions.join(' ');
+}
+
+function renderHistory(history) {
+    if (!historyContainer) return;
+    const filtered = history.filter(job => {
+        if (historyFilter === 'completed') {
+            return job.status === 'completed';
+        }
+        if (historyFilter === 'failed') {
+            return job.status !== 'completed';
+        }
+        return true;
+    });
+    historyContainer.innerHTML = '';
+    if (filtered.length === 0) {
+        historyContainer.innerHTML = '<div class="alert alert-info">Keine Einträge vorhanden.</div>';
+        return;
+    }
+    filtered.forEach(job => {
+        historyContainer.appendChild(renderHistoryCard(job));
+    });
+}
+
+function renderHistoryCard(job) {
+    const card = document.createElement('div');
+    card.className = `history-job-card ${job.status === 'completed' ? 'success' : 'failed'}`;
+    const finishedAt = job.finished_at ? formatDateTime(job.finished_at) : '-';
+    card.innerHTML = `
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <div>
+                <h6 class="mb-1">${escapeHtml(job.series_title || job.title || job.url)}</h6>
+                <div class="job-meta">${escapeHtml(job.url)} • Abschluss: ${finishedAt}</div>
+            </div>
+            <span class="badge ${job.status === 'completed' ? 'bg-success' : 'bg-danger'} text-uppercase">${escapeHtml(job.status)}</span>
+        </div>
+        ${job.error_message ? `<div class="alert alert-danger py-1 mb-2 small">${escapeHtml(job.error_message)}</div>` : ''}
+        ${renderHistoryResults(job)}
+    `;
+    return card;
+}
+
+function renderHistoryResults(job) {
+    if (!job.results || job.results.length === 0) {
+        return '<div class="text-muted small">Keine Episoden protokolliert.</div>';
+    }
+    const rows = job.results.map(result => {
+        const statusBadge = result.success ? '<span class="badge bg-success">Fertig</span>' : (result.skipped ? '<span class="badge bg-warning text-dark">Übersprungen</span>' : '<span class="badge bg-danger">Fehler</span>');
+        const actions = result.file_path ? `
+            <button class="btn btn-sm btn-outline-secondary" data-action="open-result" data-result-id="${result.id}">Öffnen</button>
+            <button class="btn btn-sm btn-outline-danger" data-action="delete-result" data-result-id="${result.id}">Löschen</button>` : '';
+        const episodeLabel = [];
+        if (typeof result.season_num === 'number') {
+            episodeLabel.push(`S${String(result.season_num).padStart(2, '0')}`);
+        }
+        if (typeof result.episode_num === 'number') {
+            episodeLabel.push(`E${String(result.episode_num).padStart(2, '0')}`);
+        }
+        return `
+            <tr>
+                <td>${episodeLabel.join(' ')}</td>
+                <td>${escapeHtml(result.title || '')}</td>
+                <td>${escapeHtml(result.language_tag || '')}</td>
+                <td>${statusBadge}</td>
+                <td class="text-end">${actions}</td>
+            </tr>`;
+    }).join('');
+    return `
+        <div class="table-responsive">
+            <table class="table table-sm history-results-table align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">Episode</th>
+                        <th scope="col">Titel</th>
+                        <th scope="col">Sprache</th>
+                        <th scope="col">Status</th>
+                        <th scope="col" class="text-end">Aktionen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows}
+                </tbody>
+            </table>
+        </div>`;
+}
+
+function updateQueueToggleButton() {
+    if (!toggleQueueBtn) return;
+    toggleQueueBtn.textContent = queuePaused ? 'Queue fortsetzen' : 'Queue pausieren';
+    toggleQueueBtn.dataset.paused = queuePaused ? 'true' : 'false';
+}
+
+// Queue and history interactions
+function handleQueueTableClick(event) {
+    const target = event.target.closest('[data-action]' );
+    if (!target) return;
+    const jobId = target.dataset.jobId;
+    if (!jobId) return;
+    const action = target.dataset.action;
+    if (action === 'pause') {
+        pauseJob(jobId);
+    } else if (action === 'resume') {
+        resumeJob(jobId);
+    } else if (action === 'cancel') {
+        cancelJob(jobId);
+    }
+}
+
+function handleHistoryActionClick(event) {
+    const target = event.target.closest('[data-action]');
+    if (!target) return;
+    const action = target.dataset.action;
+    const resultId = target.dataset.resultId;
+    if (!resultId) return;
+    if (action === 'open-result') {
+        openDownloadResult(resultId);
+    } else if (action === 'delete-result') {
+        deleteDownloadResult(resultId);
+    }
+}
+
+function handleHistoryFilterClick(event) {
+    const button = event.target.closest('[data-history-filter]');
+    if (!button) return;
+    historyFilterGroup.querySelectorAll('[data-history-filter]').forEach(btn => btn.classList.remove('active'));
+    button.classList.add('active');
+    historyFilter = button.dataset.historyFilter || 'all';
+    if (latestSnapshot && latestSnapshot.history) {
+        renderHistory(latestSnapshot.history);
+    }
+}
+
+function toggleQueueState() {
+    const paused = !queuePaused;
+    fetch('/api/download/queue/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paused })
+    })
+        .then(handleResponse)
+        .then(data => {
+            queuePaused = data.paused;
+            updateQueueToggleButton();
+        })
+        .catch(err => console.error('Queue toggle error:', err));
+}
+
+function handleActiveJobAction(action) {
+    if (!latestSnapshot || !latestSnapshot.active) return;
+    const jobId = latestSnapshot.active.id;
+    if (!jobId) return;
+    if (action === 'pause') {
+        pauseJob(jobId);
+    } else if (action === 'resume') {
+        resumeJob(jobId);
+    } else if (action === 'cancel') {
+        cancelJob(jobId);
+    }
+}
+
+function pauseJob(jobId) {
+    fetch(`/api/download/jobs/${jobId}/pause`, { method: 'POST' })
+        .then(handleResponse)
+        .then(() => checkDownloadStatus())
+        .catch(err => console.error('Pause job error:', err));
+}
+
+function resumeJob(jobId) {
+    fetch(`/api/download/jobs/${jobId}/resume`, { method: 'POST' })
+        .then(handleResponse)
+        .then(() => checkDownloadStatus())
+        .catch(err => console.error('Resume job error:', err));
+}
+
+function cancelJob(jobId) {
+    fetch(`/api/download/jobs/${jobId}/cancel`, { method: 'POST' })
+        .then(handleResponse)
+        .then(() => checkDownloadStatus())
+        .catch(err => console.error('Cancel job error:', err));
+}
+
+function openDownloadResult(resultId) {
+    fetch(`/api/download/results/${resultId}/open`, { method: 'POST' })
+        .then(handleResponse)
+        .catch(err => console.error('Open result error:', err));
+}
+
+function deleteDownloadResult(resultId) {
+    fetch(`/api/download/results/${resultId}`, { method: 'DELETE' })
+        .then(handleResponse)
+        .then(() => checkDownloadStatus())
+        .catch(err => console.error('Delete result error:', err));
+}
+
+// Search and series detail
 function handleSearchInput() {
     const query = searchInput.value.trim();
-
-    // Clear previous timeout
     if (searchTimeout) {
         clearTimeout(searchTimeout);
     }
-
-    // If query is empty, clear results
     if (query.length === 0) {
         searchResults.innerHTML = '';
         return;
     }
-
-    // Set a timeout to avoid too many requests
     searchTimeout = setTimeout(() => {
-        performSearch(query, searchType.value);
-    }, 300); // 300ms debounce
+        performSearch(query, searchType ? searchType.value : 'all');
+    }, 300);
 }
 
-/**
- * Perform search request
- */
 function performSearch(query, type) {
-    fetch(`/search?q=${encodeURIComponent(query)}&type=${type}`)
-        .then(response => response.json())
-        .then(data => {
-            displaySearchResults(data);
-        })
-        .catch(error => {
-            console.error('Search error:', error);
-        });
+    fetch(`/search?q=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}`)
+        .then(handleResponse)
+        .then(results => renderSearchResults(results || []))
+        .catch(err => console.error('Search error:', err));
 }
 
-/**
- * Display search results
- */
-function displaySearchResults(results) {
+function renderSearchResults(results) {
+    if (!searchResults) return;
     searchResults.innerHTML = '';
-
-    if (results.length === 0) {
-        searchResults.innerHTML = '<div class="alert alert-info">Keine Ergebnisse gefunden</div>';
+    if (!Array.isArray(results) || results.length === 0) {
+        searchResults.innerHTML = '<div class="alert alert-info">Keine Ergebnisse.</div>';
         return;
     }
-
     results.forEach(item => {
-        const resultItem = document.createElement('a');
-        resultItem.href = '#';
-        resultItem.className = 'list-group-item list-group-item-action search-result-item d-flex justify-content-between align-items-center';
-        resultItem.innerHTML = `
-            <div>
-                <strong>${item.title}</strong>
-                <span class="badge bg-${item.type === 'anime' ? 'primary' : 'secondary'}">${item.type === 'anime' ? 'Anime' : 'Serie'}</span>
-            </div>
-            <button class="btn btn-sm btn-success download-btn">Download</button>
-        `;
-
-        // Add click event for download button
-        resultItem.querySelector('.download-btn').addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            startDownload(item.url);
+        const entry = document.createElement('a');
+        entry.href = '#';
+        entry.className = 'list-group-item list-group-item-action d-flex justify-content-between align-items-center';
+        entry.innerHTML = `<span>${escapeHtml(item.title || item.url)}</span><span class="badge bg-secondary">${escapeHtml(item.type || 'serie')}</span>`;
+        entry.addEventListener('click', (event) => {
+            event.preventDefault();
+            showSeriesDetail(item);
         });
-
-        searchResults.appendChild(resultItem);
+        searchResults.appendChild(entry);
     });
 }
 
-/**
- * Update database
- */
-function updateDatabase() {
-    const type = searchType.value === 'anime' ? 'anime' : 'series';
-
-    updateDbBtn.disabled = true;
-    updateDbBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Aktualisiere...';
-
+function loadAniworldList() {
+    if (!animeListContainer) return;
+    animeListContainer.classList.remove('d-none');
+    animeListContainer.innerHTML = '<div class="alert alert-info">Lade Liste...</div>';
     fetch('/api/scrape/list', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ type })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'anime' })
     })
-    .then(response => response.json())
-    .then(data => {
-        if (data.status === 'success') {
-            alert(`Datenbank erfolgreich aktualisiert. ${data.count} Einträge gefunden.`);
-        } else {
-            alert('Fehler beim Aktualisieren der Datenbank: ' + (data.error || 'Unbekannter Fehler'));
-        }
-    })
-    .catch(error => {
-        console.error('Error updating database:', error);
-        alert('Fehler beim Aktualisieren der Datenbank');
-    })
-    .finally(() => {
-        updateDbBtn.disabled = false;
-        updateDbBtn.innerHTML = 'Datenbank aktualisieren';
-    });
-}
-
-/**
- * Load Aniworld list via backend scrape and render results from the local database
- */
-async function loadAniworldList() {
-    if (!loadAniworldBtn || !aniworldResults) {
-        return;
-    }
-
-    const originalLabel = loadAniworldBtn.innerHTML;
-    loadAniworldBtn.disabled = true;
-    loadAniworldBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Lädt...';
-
-    showAniworldMessage('Lade Aniworld-Liste...', 'info');
-
-    try {
-        const scrapeResponse = await fetch('/api/scrape/list', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ type: 'anime' })
-        });
-
-        const scrapeData = await scrapeResponse.json();
-        if (!scrapeResponse.ok) {
-            throw new Error(scrapeData?.error || scrapeResponse.statusText);
-        }
-
-        const scrapedItems = Array.isArray(scrapeData.items) ? scrapeData.items : [];
-
-        const params = new URLSearchParams({ type: 'anime', all: 'true' });
-        let databaseItems = [];
-        try {
-            const dbResponse = await fetch(`/search?${params.toString()}`);
-            if (dbResponse.ok) {
-                databaseItems = await dbResponse.json();
+        .then(handleResponse)
+        .then(response => {
+            if (response.status === 'success' && Array.isArray(response.items)) {
+                renderAniworldList(response.items);
             } else {
-                console.warn('Search request for Aniworld items failed with status', dbResponse.status);
+                animeListContainer.innerHTML = '<div class="alert alert-danger">Fehler beim Laden der Liste.</div>';
             }
-        } catch (err) {
-            console.warn('Search request for Aniworld items failed:', err);
-        }
-
-        const displayItems = Array.isArray(databaseItems) && databaseItems.length > 0
-            ? databaseItems
-            : scrapedItems;
-
-        renderAniworldList(displayItems, scrapeData.count || displayItems.length, scrapedItems);
-    } catch (error) {
-        console.error('Error loading Aniworld list:', error);
-        showAniworldMessage(`Fehler: ${error.message}`, 'danger');
-    } finally {
-        loadAniworldBtn.disabled = false;
-        loadAniworldBtn.innerHTML = originalLabel;
-    }
+        })
+        .catch(err => {
+            console.error('Aniworld list error:', err);
+            animeListContainer.innerHTML = '<div class="alert alert-danger">Fehler beim Laden der Liste.</div>';
+        });
 }
 
-/**
- * Render Aniworld results
- */
-function renderAniworldList(items, scrapedCount = null, fallbackItems = []) {
-    if (!aniworldResults) {
+function renderAniworldList(items) {
+    if (!animeListContainer) return;
+    if (!Array.isArray(items) || items.length === 0) {
+        animeListContainer.innerHTML = '<div class="alert alert-info">Keine Einträge.</div>';
         return;
     }
-
-    const initialItems = Array.isArray(items) ? items : [];
-    let displayItems = initialItems;
-    let usedFallback = false;
-
-    if (displayItems.length === 0 && Array.isArray(fallbackItems) && fallbackItems.length > 0) {
-        displayItems = fallbackItems;
-        usedFallback = true;
-    }
-
-    if (!Array.isArray(displayItems) || displayItems.length === 0) {
-        showAniworldMessage('Keine Animes gefunden.', 'info');
-        return;
-    }
-
-    aniworldResults.innerHTML = '';
-    aniworldResults.classList.remove('d-none');
-
-    const summary = document.createElement('div');
-    summary.className = 'alert alert-secondary mb-2';
-    const displayCount = displayItems.length;
-    const totalCount = typeof scrapedCount === 'number' ? scrapedCount : displayCount;
-    const infoText = totalCount !== displayCount
-        ? `${displayCount} von ${totalCount} Animes geladen`
-        : `${displayCount} Animes geladen`;
-
-    summary.textContent = usedFallback
-        ? `${infoText} (direkt aus Scrape)`
-        : infoText;
-
-    if (usedFallback) {
-        const hint = document.createElement('div');
-        hint.className = 'small text-muted mt-1';
-        hint.textContent = 'Hinweis: Die Einträge konnten nicht aus der lokalen Datenbank gelesen werden.';
-        summary.appendChild(hint);
-    }
-
-    aniworldResults.appendChild(summary);
-
     const listGroup = document.createElement('div');
     listGroup.className = 'list-group';
-
-    displayItems.forEach((item) => {
-        const entry = document.createElement('div');
-        entry.className = 'list-group-item';
-
-        const row = document.createElement('div');
-        row.className = 'row align-items-center g-2';
-        entry.appendChild(row);
-
-        const infoCol = document.createElement('div');
-        infoCol.className = 'col';
-
-        const title = document.createElement('strong');
-        title.textContent = item.title || 'Unbekannt';
-        infoCol.appendChild(title);
-
-        const badge = document.createElement('span');
-        badge.className = 'badge bg-primary ms-2';
-        badge.textContent = 'Anime';
-        infoCol.appendChild(badge);
-
-        const alternativeTitles = Array.isArray(item.alternative_titles)
-            ? item.alternative_titles
-            : Array.isArray(item.alt_titles)
-                ? item.alt_titles
-                : typeof item.alternative_titles === 'string'
-                    ? item.alternative_titles.split(',').map((alt) => alt.trim()).filter(Boolean)
-                    : [];
-
-        if (alternativeTitles.length > 0) {
-            const alt = document.createElement('div');
-            alt.className = 'small text-muted mt-1';
-            alt.textContent = alternativeTitles.join(' • ');
-            infoCol.appendChild(alt);
-        }
-
-        row.appendChild(infoCol);
-
-        const actionCol = document.createElement('div');
-        actionCol.className = 'col-auto';
-
-        const downloadBtn = document.createElement('button');
-        downloadBtn.className = 'btn btn-sm btn-success';
-        downloadBtn.textContent = 'Download';
-
-        if (!item.url) {
-            downloadBtn.disabled = true;
-            downloadBtn.classList.remove('btn-success');
-            downloadBtn.classList.add('btn-secondary');
-            downloadBtn.textContent = 'Kein Link';
-        } else {
-            downloadBtn.addEventListener('click', (event) => {
-                event.preventDefault();
-                startDownload(item.url);
-            });
-        }
-
-        actionCol.appendChild(downloadBtn);
-        row.appendChild(actionCol);
-
+    items.forEach(item => {
+        const entry = document.createElement('a');
+        entry.href = '#';
+        entry.className = 'list-group-item list-group-item-action d-flex justify-content-between align-items-center';
+        entry.innerHTML = `<span>${escapeHtml(item.title || item.url)}</span><span class="badge bg-secondary">${escapeHtml(item.type || 'anime')}</span>`;
+        entry.addEventListener('click', (event) => {
+            event.preventDefault();
+            showSeriesDetail(item);
+        });
         listGroup.appendChild(entry);
     });
-
-    aniworldResults.appendChild(listGroup);
+    animeListContainer.innerHTML = '';
+    animeListContainer.appendChild(listGroup);
 }
 
-/**
- * Show helper message inside Aniworld list container
- */
-function showAniworldMessage(message, level = 'info') {
-    if (!aniworldResults) {
-        return;
-    }
-
-    aniworldResults.innerHTML = '';
-    const alert = document.createElement('div');
-    alert.className = 'alert alert-' + level + ' mb-0';
-    alert.textContent = message;
-    aniworldResults.appendChild(alert);
-    aniworldResults.classList.remove('d-none');
-}
-
-/**
- * Start download
- */
-function startDownload(url) {
-    if (isDownloading) {
-        alert('Es läuft bereits ein Download!');
-        return;
-    }
-
-    fetch('/download', {
+function showSeriesDetail(item) {
+    if (!seriesDetailCard) return;
+    seriesDetailCard.classList.remove('d-none');
+    seriesDetailTitle.textContent = item.title || item.url;
+    seriesDetailBody.innerHTML = '<div class="text-muted">Lade Details...</div>';
+    selectedEpisodes = {};
+    fetch('/api/anime/details', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ url })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: item.url })
     })
-    .then(response => {
-        if (!response.ok) {
-            return response.json().then(data => {
-                throw new Error(data.error || 'Unbekannter Fehler');
-            });
-        }
-        return response.json();
-    })
-    .then(data => {
-        console.log('Download started:', data);
-        // Switch to status tab
-        document.getElementById('status-tab').click();
-    })
-    .catch(error => {
-        console.error('Error starting download:', error);
-        alert('Fehler beim Starten des Downloads: ' + error.message);
+        .then(handleResponse)
+        .then(response => {
+            if (response.status === 'success' && response.data) {
+                currentSeriesDetail = response.data;
+                renderSeriesDetail(response.data);
+            } else {
+                seriesDetailBody.innerHTML = '<div class="alert alert-danger">Details konnten nicht geladen werden.</div>';
+            }
+        })
+        .catch(err => {
+            console.error('Detail error:', err);
+            seriesDetailBody.innerHTML = '<div class="alert alert-danger">Details konnten nicht geladen werden.</div>';
+        });
+}
+
+function hideSeriesDetail() {
+    if (!seriesDetailCard) return;
+    seriesDetailCard.classList.add('d-none');
+    seriesDetailBody.innerHTML = '';
+    selectedEpisodes = {};
+    currentSeriesDetail = null;
+    if (selectAllEpisodesCheckbox) {
+        selectAllEpisodesCheckbox.checked = false;
+    }
+}
+
+function renderSeriesDetail(detail) {
+    if (!seriesDetailBody) return;
+    if (!detail || !Array.isArray(detail.seasons)) {
+        seriesDetailBody.innerHTML = '<div class="alert alert-info">Keine Episoden gefunden.</div>';
+        return;
+    }
+    const fragment = document.createDocumentFragment();
+    detail.seasons.forEach(season => {
+        const container = document.createElement('div');
+        container.className = 'series-detail-season';
+        container.innerHTML = `<h6>Staffel ${season.season}</h6>`;
+        const episodesList = document.createElement('div');
+        episodesList.className = 'series-detail-episodes';
+        (season.episodes || []).forEach(ep => {
+            const check = document.createElement('div');
+            check.className = 'form-check';
+            check.innerHTML = `
+                <input class="form-check-input" type="checkbox" value="${ep.number}" data-season="${season.season}" data-episode-title="${escapeHtml(ep.title || '')}">
+                <label class="form-check-label">${String(ep.number).padStart(2, '0')} - ${escapeHtml(ep.title || 'Episode')} (${ep.has_german_dub ? 'GerDub' : ep.has_german_sub ? 'GerSub' : '—'})</label>`;
+            check.querySelector('input').addEventListener('change', handleEpisodeCheckboxChange);
+            episodesList.appendChild(check);
+        });
+        container.appendChild(episodesList);
+        fragment.appendChild(container);
+    });
+    seriesDetailBody.innerHTML = '';
+    seriesDetailBody.appendChild(fragment);
+}
+
+function handleSelectAllEpisodes(event) {
+    const checked = event.target.checked;
+    if (!seriesDetailBody) return;
+    seriesDetailBody.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        cb.checked = checked;
+        cb.dispatchEvent(new Event('change'));
     });
 }
 
-/**
- * Start VOE.sx download
- */
-function startVoeDownload() {
-    const url = voeUrlInput.value.trim();
-    const filename = voeFilenameInput.value.trim();
+function enqueueSelectedEpisodes() {
+    if (!currentSeriesDetail) return;
+    const payload = {
+        url: currentSeriesDetail.url,
+        title: currentSeriesDetail.title,
+        options: {
+            selected_episodes: serializeSelection(),
+            series_title: currentSeriesDetail.title
+        }
+    };
+    startDownload(payload);
+}
 
+function serializeSelection() {
+    const result = {};
+    Object.keys(selectedEpisodes).forEach(season => {
+        const values = Array.from(selectedEpisodes[season]);
+        if (values.length > 0) {
+            result[season] = values;
+        }
+    });
+    if (Object.keys(result).length === 0 && currentSeriesDetail) {
+        // No explicit selection: download all episodes
+        currentSeriesDetail.seasons.forEach(season => {
+            result[season.season] = 'all';
+        });
+    }
+    return result;
+}
+
+// Download helpers
+function startDownload(payload) {
+    let body;
+    if (typeof payload === 'string') {
+        body = { url: payload };
+    } else {
+        body = payload;
+    }
+    fetch('/api/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+        .then(handleResponse)
+        .then(response => {
+            if (response && response.job) {
+                hideSeriesDetail();
+                checkDownloadStatus();
+            } else if (response && response.status === 'queued') {
+                checkDownloadStatus();
+            }
+        })
+        .catch(err => {
+            console.error('Download start error:', err);
+            alert('Fehler beim Starten des Downloads');
+        });
+}
+
+function startVoeDownload() {
+    const url = voeUrlInput ? voeUrlInput.value.trim() : '';
+    const filename = voeFilenameInput ? voeFilenameInput.value.trim() : '';
     if (!url) {
         alert('Bitte gib eine VOE.sx URL ein');
         return;
     }
-
-    if (isDownloading) {
-        alert('Es läuft bereits ein Download!');
-        return;
-    }
-
     fetch('/download_voe', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            url: url,
-            filename: filename || null
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, filename: filename || null })
     })
-    .then(response => {
-        if (!response.ok) {
-            return response.json().then(data => {
-                throw new Error(data.error || 'Unbekannter Fehler');
-            });
-        }
-        return response.json();
-    })
-    .then(data => {
-        console.log('VOE download started:', data);
-        // Switch to status tab
-        document.getElementById('status-tab').click();
-    })
-    .catch(error => {
-        console.error('Error starting VOE download:', error);
-        alert('Fehler beim Starten des Downloads: ' + error.message);
-    });
+        .then(handleResponse)
+        .then(() => checkDownloadStatus())
+        .catch(err => {
+            console.error('VOE download error:', err);
+            alert('Fehler beim Starten des VOE Downloads');
+        });
 }
 
-/**
- * Reset session
- */
 function resetSession() {
-    fetch('/api/reset', {
-        method: 'POST'
-    })
-    .then(response => response.json())
-    .then(data => {
-        console.log('Session reset:', data);
-        alert('Session zurückgesetzt');
-        checkDownloadStatus();
-        resetEpisodeStatus();
-    })
-    .catch(error => {
-        console.error('Error resetting session:', error);
-        alert('Fehler beim Zurücksetzen der Session');
-    });
+    fetch('/api/reset', { method: 'POST' })
+        .then(handleResponse)
+        .then(() => {
+            alert('Session zurückgesetzt');
+            checkDownloadStatus();
+        })
+        .catch(err => {
+            console.error('Reset error:', err);
+            alert('Fehler beim Zurücksetzen der Session');
+        });
 }
 
-/**
- * Cancel download
- */
-function cancelDownload() {
-    if (!isDownloading) {
-        return;
-    }
-
-    fetch('/api/cancel', {
-        method: 'POST'
-    })
-    .then(response => response.json())
-    .then(data => {
-        console.log('Download cancelled:', data);
-        alert('Download abgebrochen');
-        checkDownloadStatus();
-        resetEpisodeStatus();
-    })
-    .catch(error => {
-        console.error('Error cancelling download:', error);
-        alert('Fehler beim Abbrechen des Downloads');
-    });
-}
-
-/**
- * Check download status
- */
+// Settings & status fetchers
 function checkDownloadStatus() {
     fetch('/api/download/status')
-        .then(response => response.json())
-        .then(updateStatusDisplay)
-        .catch(error => {
-            console.error('Error checking download status:', error);
-        });
+        .then(handleResponse)
+        .then(snapshot => {
+            latestSnapshot = snapshot;
+            updateStatusDisplay(snapshot);
+        })
+        .catch(err => console.error('Status error:', err));
 }
 
-/**
- * Update status display
- */
-function updateStatusDisplay(status) {
-    console.log('Status update:', status);
-
-    const prevDownloading = wasDownloading;
-    isDownloading = status.is_downloading;
-    wasDownloading = isDownloading;
-
-    if (!prevDownloading && isDownloading) {
-        resetEpisodeStatus();
-    }
-
-    if (isDownloading) {
-        downloadStatus.classList.add('downloading');
-        statusTitle.textContent = status.title || 'Download läuft...';
-        statusMessage.textContent = status.status_message || 'Verarbeite...';
-        statusProgress.style.width = `${status.progress || 0}%`;
-        statusProgress.textContent = `${status.progress || 0}%`;
-        statusProgress.parentElement.style.display = 'flex';
-        statusEpisode.textContent = status.current_episode || '1';
-        statusTotalEpisodes.textContent = status.total_episodes || '?';
-        cancelDownloadBtn.style.display = 'inline-block';
-    } else {
-        downloadStatus.classList.remove('downloading');
-        statusTitle.textContent = 'Kein aktiver Download';
-        statusMessage.textContent = status.status_message || '-';
-        statusProgress.parentElement.style.display = 'none';
-        statusEpisode.textContent = '-';
-        statusTotalEpisodes.textContent = '-';
-        cancelDownloadBtn.style.display = 'none';
-    }
-}
-
-function handleEpisodeUpdate(update) {
-    if (!episodeStatusTableBody || !update || !update.episode_id) {
-        return;
-    }
-
-    const existing = episodeStatus.get(update.episode_id) || {};
-    episodeStatus.set(update.episode_id, {
-        ...existing,
-        ...update,
-    });
-
-    renderEpisodeTable();
-}
-
-function renderEpisodeTable() {
-    if (!episodeStatusTableBody) {
-        return;
-    }
-
-    episodeStatusTableBody.innerHTML = '';
-
-    const showOnlyErrors = episodeFilterErrors ? episodeFilterErrors.checked : false;
-    const entries = Array.from(episodeStatus.values()).sort((a, b) => {
-        if (!a.episode_id || !b.episode_id) {
-            return 0;
-        }
-        return a.episode_id.localeCompare(b.episode_id);
-    });
-
-    let visibleCount = 0;
-
-    entries.forEach((entry) => {
-        const isError = entry.result === false;
-        if (showOnlyErrors && !isError) {
-            return;
-        }
-
-        visibleCount += 1;
-
-        const row = document.createElement('tr');
-        if (entry.result === true) {
-            row.classList.add('table-success');
-        } else if (entry.result === false) {
-            row.classList.add('table-danger');
-        }
-
-        if (entry.title) {
-            row.title = entry.title;
-        }
-
-        const progressText = typeof entry.progress === 'number' ? `${entry.progress}%` : '-';
-        const mirrorText = entry.mirror !== undefined && entry.mirror !== null ? entry.mirror : '-';
-        const triesText = entry.tries !== undefined && entry.tries !== null ? entry.tries : '-';
-        let resultSymbol = '⏳';
-        if (entry.result === true) {
-            resultSymbol = '✅';
-        } else if (entry.result === false) {
-            resultSymbol = '❌';
-        }
-
-        const cells = [
-            entry.episode_id || '-',
-            progressText,
-            mirrorText,
-            triesText,
-            resultSymbol,
-            entry.msg || '',
-        ];
-
-        cells.forEach((value, index) => {
-            const cell = document.createElement('td');
-            cell.textContent = value;
-            if (index === 5) {
-                cell.classList.add('text-break');
-            }
-            row.appendChild(cell);
-        });
-
-        episodeStatusTableBody.appendChild(row);
-    });
-
-    if (visibleCount === 0) {
-        const row = document.createElement('tr');
-        const cell = document.createElement('td');
-        cell.colSpan = 6;
-        cell.className = 'text-center text-muted py-3';
-        cell.textContent = showOnlyErrors ? 'Keine Fehler' : 'Noch keine Daten';
-        row.appendChild(cell);
-        episodeStatusTableBody.appendChild(row);
-    }
-}
-
-function resetEpisodeStatus() {
-    episodeStatus = new Map();
-    renderEpisodeTable();
-}
-
-/**
- * Load download directory
- */
 function loadDownloadDirectory() {
     fetch('/api/settings/download-dir')
-        .then(response => response.json())
+        .then(handleResponse)
         .then(data => {
-            if (data.status === 'success') {
+            if (!data) return;
+            if (data.download_dir && currentDownloadDir) {
                 currentDownloadDir.textContent = data.download_dir;
+            }
+            if (downloadDirInput && data.download_dir) {
                 downloadDirInput.value = data.download_dir;
             }
         })
-        .catch(error => {
-            console.error('Error loading download directory:', error);
-            currentDownloadDir.textContent = 'Fehler beim Laden';
-        });
+        .catch(err => console.error('Download directory error:', err));
 }
 
-/**
- * Update download directory
- */
-function updateDownloadDirectory() {
-    const newDir = downloadDirInput.value.trim();
-
-    if (!newDir) {
-        alert('Bitte gib ein Verzeichnis ein');
-        return;
-    }
-
+function saveDownloadDirectory(event) {
+    event.preventDefault();
+    if (!downloadDirInput) return;
     fetch('/api/settings/download-dir', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ download_dir: newDir })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ directory: downloadDirInput.value.trim() })
     })
-    .then(response => response.json())
-    .then(data => {
-        if (data.status === 'success') {
-            currentDownloadDir.textContent = data.download_dir;
-            alert(data.message);
-        } else {
-            alert('Fehler: ' + (data.error || 'Unbekannter Fehler'));
-        }
-    })
-    .catch(error => {
-        console.error('Error updating download directory:', error);
-        alert('Fehler beim Aktualisieren des Download-Verzeichnisses');
-    });
+        .then(handleResponse)
+        .then(() => loadDownloadDirectory())
+        .catch(err => console.error('Download directory save error:', err));
 }
 
-/**
- * Scan directory
- */
 function scanDirectory() {
-    if (!confirm('Möchtest du das Download-Verzeichnis scannen? Dies kann je nach Größe des Verzeichnisses einige Zeit dauern.')) {
-        return;
-    }
-
-    scanDirBtn.disabled = true;
-    scanDirBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Scanne...';
-
-    fetch('/api/settings/download-dir', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ scan_only: true })
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.status === 'success') {
-            alert(data.message);
-            loadDatabaseStats();
-            loadLibraryContent();
-        } else {
-            alert('Fehler: ' + (data.error || 'Unbekannter Fehler'));
-        }
-    })
-    .catch(error => {
-        console.error('Error scanning directory:', error);
-        alert('Fehler beim Scannen des Verzeichnisses');
-    })
-    .finally(() => {
-        scanDirBtn.disabled = false;
-        scanDirBtn.textContent = 'Verzeichnis scannen';
-    });
+    alert('Verzeichnis-Scan ist derzeit nicht verfügbar.');
 }
 
-/**
- * Clear database
- */
 function clearDatabase() {
-    if (!confirm('Möchtest du wirklich die Datenbank zurücksetzen? Alle Informationen über vorhandene Serien und Animes werden gelöscht.')) {
-        return;
-    }
-
-    clearDbBtn.disabled = true;
-    clearDbBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Lösche...';
-
-    fetch('/api/media/clear', {
-        method: 'POST'
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.status === 'success') {
-            alert('Datenbank erfolgreich zurückgesetzt');
-            loadDatabaseStats();
-            loadLibraryContent();
-        } else {
-            alert('Fehler: ' + (data.error || 'Unbekannter Fehler'));
-        }
-    })
-    .catch(error => {
-        console.error('Error clearing database:', error);
-        alert('Fehler beim Zurücksetzen der Datenbank');
-    })
-    .finally(() => {
-        clearDbBtn.disabled = false;
-        clearDbBtn.textContent = 'Datenbank zurücksetzen';
-    });
+    alert('Zurücksetzen der Datenbank ist derzeit nicht verfügbar.');
 }
 
-/**
- * Repair database by running integrity check and recreating if needed
- */
-function repairDatabase() {
-    if (!repairDbBtn) {
-        return;
-    }
-
-    const originalLabel = repairDbBtn.innerHTML;
-    repairDbBtn.disabled = true;
-    repairDbBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Prüfe...';
-
-    fetch('/api/db/repair', {
-        method: 'POST'
-    })
-        .then(async (response) => {
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) {
-                throw new Error(data.error || data.message || response.statusText);
-            }
-            return data;
-        })
-        .then((data) => {
-            const backupInfo = data.backup ? `\nBackup: ${data.backup}` : '';
-            const message = data.message || 'Datenbank wurde geprüft.';
-            alert(message + backupInfo);
-            loadDatabaseStats();
-            if (data.status === 'recreated') {
-                loadLibraryContent();
-            }
-        })
-        .catch((error) => {
-            console.error('Error repairing database:', error);
-            alert('Fehler bei der Datenbank-Prüfung: ' + error.message);
-        })
-        .finally(() => {
-            repairDbBtn.disabled = false;
-            repairDbBtn.innerHTML = originalLabel;
-        });
-}
-
-/**
- * Load database statistics
- */
 function loadDatabaseStats() {
     fetch('/api/media/stats')
-        .then(response => response.json())
+        .then(handleResponse)
         .then(data => {
-            if (data.status === 'success') {
-                const stats = data.stats;
-                dbStats.innerHTML = `
-                    <h5>Statistiken</h5>
-                    <ul class="list-group">
-                        <li class="list-group-item d-flex justify-content-between align-items-center">
-                            Serien
-                            <span class="badge bg-primary rounded-pill">${stats.series_count}</span>
-                        </li>
-                        <li class="list-group-item d-flex justify-content-between align-items-center">
-                            Animes
-                            <span class="badge bg-primary rounded-pill">${stats.anime_count}</span>
-                        </li>
-                        <li class="list-group-item d-flex justify-content-between align-items-center">
-                            Episoden
-                            <span class="badge bg-primary rounded-pill">${stats.episode_count}</span>
-                        </li>
-                        <li class="list-group-item d-flex justify-content-between align-items-center">
-                            Gesamtgröße
-                            <span class="badge bg-primary rounded-pill">${stats.total_size_gb.toFixed(2)} GB</span>
-                        </li>
-                    </ul>
-                `;
-            } else {
-                dbStats.innerHTML = `<div class="alert alert-danger">Fehler beim Laden der Statistiken</div>`;
+            if (!dbStats) return;
+            if (!data || data.status !== 'success') {
+                dbStats.innerHTML = '<p>Fehler beim Laden der Statistiken.</p>';
+                return;
             }
+            dbStats.innerHTML = `
+                <p>Serien/Animes: ${data.media_count}</p>
+                <p>Staffeln: ${data.season_count}</p>
+                <p>Episoden: ${data.episode_count}</p>
+            `;
         })
-        .catch(error => {
-            console.error('Error loading database stats:', error);
-            dbStats.innerHTML = `<div class="alert alert-danger">Fehler beim Laden der Statistiken</div>`;
+        .catch(err => {
+            console.error('DB stats error:', err);
+            if (dbStats) {
+                dbStats.innerHTML = '<p>Fehler beim Laden der Statistiken.</p>';
+            }
         });
 }
 
-/**
- * Load library content
- */
+function loadLanguageSettings() {
+    if (!languageForm) return;
+    fetch('/api/settings/language')
+        .then(handleResponse)
+        .then(data => {
+            if (!data || data.status !== 'success') return;
+            if (languagePreferInput) languagePreferInput.value = (data.prefer || []).join(',');
+            if (languageRequireDubInput) languageRequireDubInput.checked = !!data.require_dub;
+            if (languageVerifyWhisperInput) languageVerifyWhisperInput.checked = !!data.verify_with_whisper;
+            if (languageRemuxInput) languageRemuxInput.checked = !!data.remux_to_de_if_present;
+            if (languageAcceptErrorInput) languageAcceptErrorInput.checked = !!data.accept_on_error;
+            if (languageSampleSecondsInput) languageSampleSecondsInput.value = data.sample_seconds || 45;
+        })
+        .catch(err => console.error('Language settings error:', err));
+}
+
+function saveLanguageSettings(event) {
+    event.preventDefault();
+    fetch('/api/settings/language', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            prefer: languagePreferInput ? languagePreferInput.value.split(',').map(v => v.trim()).filter(Boolean) : ['de','deu','ger'],
+            require_dub: languageRequireDubInput ? languageRequireDubInput.checked : true,
+            verify_with_whisper: languageVerifyWhisperInput ? languageVerifyWhisperInput.checked : true,
+            remux_to_de_if_present: languageRemuxInput ? languageRemuxInput.checked : true,
+            accept_on_error: languageAcceptErrorInput ? languageAcceptErrorInput.checked : false,
+            sample_seconds: languageSampleSecondsInput ? Number(languageSampleSecondsInput.value) || 45 : 45
+        })
+    })
+        .then(handleResponse)
+        .catch(err => console.error('Language settings save error:', err));
+}
+
+// Library helpers
 function loadLibraryContent() {
-    libraryContent.innerHTML = `<div class="alert alert-info">Lade Mediathek...</div>`;
-
     fetch('/api/media/list')
-        .then(response => response.json())
+        .then(handleResponse)
         .then(data => {
-            if (data.status === 'success') {
-                if (data.media.length === 0) {
-                    libraryContent.innerHTML = `<div class="alert alert-info">Keine Medien in der Datenbank gefunden</div>`;
-                    return;
-                }
-
-                // Sortiere nach Typ und Titel
-                const sortedMedia = data.media.sort((a, b) => {
-                    if (a.type !== b.type) {
-                        return a.type === 'series' ? -1 : 1;
-                    }
-                    return a.title.localeCompare(b.title);
-                });
-
-                // Gruppiere nach Typ
-                const seriesMedia = sortedMedia.filter(m => m.type === 'series');
-                const animeMedia = sortedMedia.filter(m => m.type === 'anime');
-
-                let html = '';
-
-                if (seriesMedia.length > 0) {
-                    html += `<h4>Serien (${seriesMedia.length})</h4>`;
-                    html += `<div class="row row-cols-1 row-cols-md-3 g-4 mb-4">`;
-                    seriesMedia.forEach(media => {
-                        html += createMediaCard(media);
-                    });
-                    html += `</div>`;
-                }
-
-                if (animeMedia.length > 0) {
-                    html += `<h4>Animes (${animeMedia.length})</h4>`;
-                    html += `<div class="row row-cols-1 row-cols-md-3 g-4">`;
-                    animeMedia.forEach(media => {
-                        html += createMediaCard(media);
-                    });
-                    html += `</div>`;
-                }
-
-                libraryContent.innerHTML = html;
-
-                // Füge Event-Listener für die Karten hinzu
-                document.querySelectorAll('.media-card').forEach(card => {
-                    card.addEventListener('click', () => {
-                        const mediaId = card.getAttribute('data-id');
-                        loadMediaDetails(mediaId);
-                    });
-                });
-            } else {
-                libraryContent.innerHTML = `<div class="alert alert-danger">Fehler beim Laden der Mediathek</div>`;
+            if (!libraryContent) return;
+            if (!data || data.status !== 'success') {
+                libraryContent.innerHTML = '<div class="alert alert-danger">Fehler beim Laden der Mediathek.</div>';
+                return;
             }
+            renderLibrary(data.media || []);
         })
-        .catch(error => {
-            console.error('Error loading library content:', error);
-            libraryContent.innerHTML = `<div class="alert alert-danger">Fehler beim Laden der Mediathek</div>`;
+        .catch(err => {
+            console.error('Library load error:', err);
+            if (libraryContent) {
+                libraryContent.innerHTML = '<div class="alert alert-danger">Fehler beim Laden der Mediathek.</div>';
+            }
         });
 }
 
-/**
- * Create media card
- */
-function createMediaCard(media) {
-    return `
-        <div class="col">
-            <div class="card h-100 media-card" data-id="${media.id}">
-                <div class="card-body">
-                    <h5 class="card-title">${media.title}</h5>
-                    <p class="card-text">
-                        <span class="badge bg-${media.type === 'anime' ? 'primary' : 'secondary'}">${media.type === 'anime' ? 'Anime' : 'Serie'}</span>
-                    </p>
-                </div>
-                <div class="card-footer">
-                    <small class="text-muted">Verzeichnis: ${media.directory.split('/').pop()}</small>
-                </div>
-            </div>
-        </div>
-    `;
-}
-
-/**
- * Load media details
- */
-function loadMediaDetails(mediaId) {
-    fetch(`/api/media/details/${mediaId}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.status === 'success') {
-                const media = data.media;
-                const seasons = data.seasons;
-
-                let html = `
-                    <div class="card mb-4">
-                        <div class="card-header d-flex justify-content-between align-items-center">
-                            <h5 class="mb-0">${media.title}</h5>
-                            <button class="btn btn-sm btn-secondary" onclick="loadLibraryContent()">Zurück</button>
-                        </div>
-                        <div class="card-body">
-                            <p><strong>Typ:</strong> ${media.type === 'anime' ? 'Anime' : 'Serie'}</p>
-                            <p><strong>Verzeichnis:</strong> ${media.directory}</p>
-                            <p><strong>Zuletzt aktualisiert:</strong> ${new Date(media.last_updated).toLocaleString()}</p>
-                        </div>
+function renderLibrary(items) {
+    if (!libraryContent) return;
+    if (!Array.isArray(items) || items.length === 0) {
+        libraryContent.innerHTML = '<div class="alert alert-info">Keine Einträge in der Mediathek.</div>';
+        return;
+    }
+    const fragment = document.createDocumentFragment();
+    items.forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'card mb-3';
+        card.innerHTML = `
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h5 class="card-title">${escapeHtml(item.title || item.url)}</h5>
+                        <div class="text-muted small">${escapeHtml(item.type || 'serie')}</div>
                     </div>
-                `;
-
-                if (seasons.length === 0) {
-                    html += `<div class="alert alert-info">Keine Staffeln gefunden</div>`;
-                } else {
-                    seasons.forEach(season => {
-                        html += `
-                            <div class="card mb-3">
-                                <div class="card-header">
-                                    <h5>Staffel ${season.season_number}</h5>
-                                </div>
-                                <div class="card-body">
-                        `;
-
-                        if (season.episodes.length === 0) {
-                            html += `<p>Keine Episoden gefunden</p>`;
-                        } else {
-                            html += `<div class="table-responsive"><table class="table table-striped">
-                                <thead>
-                                    <tr>
-                                        <th>Episode</th>
-                                        <th>Titel</th>
-                                        <th>Größe</th>
-                                        <th>Sprache</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                            `;
-
-                            season.episodes.forEach(episode => {
-                                const fileSize = episode.file_size ? (episode.file_size / (1024 * 1024)).toFixed(2) + ' MB' : 'Unbekannt';
-                                const language = [];
-                                if (episode.has_german_dub) language.push('GerDub');
-                                if (episode.has_german_sub) language.push('GerSub');
-
-                                html += `
-                                    <tr>
-                                        <td>${episode.episode_number}</td>
-                                        <td>${episode.title || 'Unbekannt'}</td>
-                                        <td>${fileSize}</td>
-                                        <td>${language.join(', ') || 'Unbekannt'}</td>
-                                    </tr>
-                                `;
-                            });
-
-                            html += `
-                                </tbody>
-                            </table></div>
-                            `;
+                    <span class="badge bg-secondary">${item.episode_count || 0} Episoden</span>
+                </div>
+            </div>`;
+        card.addEventListener('click', () => {
+            if (item.id) {
+                fetch(`/api/media/details/${item.id}`)
+                    .then(handleResponse)
+                    .then(response => {
+                        // reuse series detail rendering
+                        if (response && response.status === 'success' && response.media) {
+                            showLibraryDetail(response.media);
                         }
-
-                        html += `
-                                </div>
-                            </div>
-                        `;
                     });
-                }
-
-                libraryContent.innerHTML = html;
-            } else {
-                alert('Fehler: ' + (data.error || 'Unbekannter Fehler'));
             }
-        })
-        .catch(error => {
-            console.error('Error loading media details:', error);
-            alert('Fehler beim Laden der Mediendetails');
         });
+        fragment.appendChild(card);
+    });
+    libraryContent.innerHTML = '';
+    libraryContent.appendChild(fragment);
 }
 
-/**
- * Handle library search
- */
-function handleLibrarySearch() {
-    const query = librarySearch.value.trim();
+function showLibraryDetail(media) {
+    if (!media) return;
+    seriesDetailCard.classList.remove('d-none');
+    seriesDetailTitle.textContent = media.title || media.directory;
+    selectedEpisodes = {};
+    const seasons = media.seasons || [];
+    const detail = {
+        url: media.url,
+        title: media.title,
+        seasons: seasons.map(season => ({
+            season: season.season_number,
+            episodes: season.episodes || []
+        }))
+    };
+    currentSeriesDetail = detail;
+    renderSeriesDetail(detail);
+}
 
+function handleLibrarySearch() {
+    if (!librarySearch) return;
+    const query = librarySearch.value.trim();
     if (query.length === 0) {
         loadLibraryContent();
         return;
     }
-
-    filterLibraryContent(query, libraryType.value);
+    filterLibraryContent(query, libraryType ? libraryType.value : 'all');
 }
 
-/**
- * Filter library content
- */
 function filterLibraryContent(query, type) {
-    const mediaCards = document.querySelectorAll('.media-card');
-    let visibleCount = 0;
-
-    mediaCards.forEach(card => {
-        const title = card.querySelector('.card-title').textContent.toLowerCase();
-        const mediaType = card.querySelector('.badge').textContent.toLowerCase();
-
+    if (!libraryContent) return;
+    const cards = libraryContent.querySelectorAll('.card');
+    cards.forEach(card => {
+        const title = card.querySelector('.card-title')?.textContent?.toLowerCase() || '';
+        const badge = card.querySelector('.text-muted')?.textContent?.toLowerCase() || '';
         const matchesQuery = title.includes(query.toLowerCase());
-        const matchesType = type === 'all' ||
-                           (type === 'series' && mediaType === 'serie') ||
-                           (type === 'anime' && mediaType === 'anime');
-
-        if (matchesQuery && matchesType) {
-            card.closest('.col').style.display = '';
-            visibleCount++;
-        } else {
-            card.closest('.col').style.display = 'none';
-        }
+        const matchesType = type === 'all' || badge.includes(type.toLowerCase());
+        card.style.display = matchesQuery && matchesType ? '' : 'none';
     });
+}
 
-    // Zeige eine Nachricht an, wenn keine Ergebnisse gefunden wurden
-    const seriesHeader = document.querySelector('h4:contains("Serien")');
-    const animeHeader = document.querySelector('h4:contains("Animes")');
-
-    if (seriesHeader) seriesHeader.style.display = type === 'anime' ? 'none' : '';
-    if (animeHeader) animeHeader.style.display = type === 'series' ? 'none' : '';
-
-    if (visibleCount === 0) {
-        const noResultsMsg = document.createElement('div');
-        noResultsMsg.className = 'alert alert-info';
-        noResultsMsg.textContent = 'Keine Ergebnisse gefunden';
-
-        // Entferne vorherige Nachrichten
-        const existingMsg = libraryContent.querySelector('.alert');
-        if (existingMsg) existingMsg.remove();
-
-        libraryContent.appendChild(noResultsMsg);
-    } else {
-        // Entferne vorherige Nachrichten
-        const existingMsg = libraryContent.querySelector('.alert');
-        if (existingMsg) existingMsg.remove();
+// Utilities
+function handleResponse(response) {
+    if (!response.ok) {
+        return response.json().then(data => {
+            throw data;
+        }).catch(() => {
+            throw new Error('Unbekannter Fehler');
+        });
     }
+    return response.json();
+}
+
+function formatBytes(bytes) {
+    if (!bytes && bytes !== 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+    }
+    return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatSpeed(bytesPerSecond) {
+    if (!bytesPerSecond) return '-';
+    return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function formatEta(seconds) {
+    if (!seconds && seconds !== 0) return '-';
+    if (seconds < 0) return '-';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    if (mins === 0) {
+        return `${secs}s`;
+    }
+    return `${mins}m ${secs}s`;
+}
+
+function formatDateTime(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '-';
+    return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+}
+
+function escapeHtml(text) {
+    if (text === undefined || text === null) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function handleEpisodeCheckboxChange(event) {
+    const checkbox = event.target;
+    const season = checkbox.dataset.season;
+    const episode = Number(checkbox.value);
+    if (!season || Number.isNaN(episode)) return;
+    if (!selectedEpisodes[season]) {
+        selectedEpisodes[season] = new Set();
+    }
+    if (checkbox.checked) {
+        selectedEpisodes[season].add(episode);
+    } else {
+        selectedEpisodes[season].delete(episode);
+        if (selectedEpisodes[season].size === 0) {
+            delete selectedEpisodes[season];
+        }
+    }
+}
+
+function updateDatabase() {
+    loadAniworldList();
 }
