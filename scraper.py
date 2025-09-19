@@ -1276,38 +1276,27 @@ class StreamScraper:
             if has_dub or (allow_german_sub and has_sub):
                 count += 1
         return count
+
     def get_series_details(self, url: str) -> Dict[str, Any]:
-        """Return a structured overview of seasons and episodes for a given series URL."""
+        """Return seasons and episodes for a series details view."""
+        base_url = self.get_base_url(url)
         response = self.make_request(url)
         if not response:
-            raise ValueError('Serienseite konnte nicht geladen werden')
+            return {"title": "Unbekannt", "seasons": []}
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        base_url = self.get_base_url(url)
-        series_name = self._extract_series_name(url)
+        series_title = self._extract_series_name(url)
+        soup = BeautifulSoup(response.text, "html.parser")
         seasons = self._extract_seasons(soup, base_url, url)
-        details = {
-            'title': series_name,
-            'url': url,
-            'seasons': []
-        }
+
+        result: Dict[str, Any] = {"title": series_title, "seasons": []}
         for season in seasons:
-            episodes = self._extract_episodes(season['url'], base_url)
-            season_entry = {
-                'season': season['number'],
-                'url': season['url'],
-                'episodes': []
-            }
-            for episode in episodes:
-                season_entry['episodes'].append({
-                    'number': episode.get('number'),
-                    'title': episode.get('title'),
-                    'url': episode.get('url'),
-                    'has_german_dub': episode.get('has_german_dub', False),
-                    'has_german_sub': episode.get('has_german_sub', False)
-                })
-            details['seasons'].append(season_entry)
-        return details
+            episodes = self._extract_episodes(season["url"], base_url)
+            result["seasons"].append({
+                "number": season["number"],
+                "url": season["url"],
+                "episodes": episodes,
+            })
+        return result
 
 
     def start_download(self, url: str, job_options: Optional[Dict[str, Any]] = None):

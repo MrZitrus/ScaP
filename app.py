@@ -8,7 +8,7 @@ import uuid
 import sys
 import subprocess
 from collections import deque
-from scraper import StreamScraper
+from scraper import StreamScraper, DownloadTask
 from download_manager import DownloadManager
 import logging
 import threading
@@ -178,25 +178,24 @@ def search():
     } for s in results])
 
 
-@app.route('/api/anime/details', methods=['POST'])
-def get_anime_details():
-    data = request.get_json(force=True) or {}
-    url = data.get('url')
+@app.route('/api/anime/details')
+def anime_details():
+    url = request.args.get('url', '').strip()
     if not url:
-        return jsonify({'error': 'URL ist erforderlich'}), 400
+        return jsonify({'status': 'error', 'error': 'url missing'}), 400
     try:
         details = scraper.get_series_details(url)
-        return jsonify({'status': 'success', 'data': details})
-    except Exception as exc:
-        logger.error(f"Fehler beim Laden der Serien-Details: {exc}", exc_info=True)
-        return jsonify({'error': str(exc)}), 500
+        return jsonify({'status': 'success', 'details': details})
+    except Exception as e:
+        logger.error(f"/api/anime/details error: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 
 @app.route('/api/scrape/list', methods=['POST'])
 def scrape_list():
     """Scrapt die Liste aller verfügbaren Serien/Animes"""
     series_type = request.json.get('type')
-    logger.info(f"🔍 Starte Scraping für Typ: {series_type}")
+    logger.info(f"🔍 Starte Scraping fuer Typ: {series_type}")
 
     try:
         if series_type == 'anime':
@@ -231,19 +230,121 @@ def scrape_list():
 
 @app.route('/api/download', methods=['POST'])
 def start_download():
-    """Fügt einen neuen Download-Auftrag zur Warteschlange hinzu."""
-    data = request.get_json(force=True)
-    url = (data or {}).get('url')
-    if not url:
-        return jsonify({'error': 'URL ist erforderlich'}), 400
-    series_title = (data or {}).get('title') or url
-    options = (data or {}).get('options') or {}
-    if 'selectedEpisodes' in data:
-        options['selected_episodes'] = data.get('selectedEpisodes')
-    if 'seriesTitle' in data:
-        options['series_title'] = data.get('seriesTitle')
-    job = download_manager.enqueue_job(url, series_title, options=options)
-    return jsonify({'status': 'queued', 'job': download_manager.serialize_job(job)})
+    data = request.get_json(force=True) or {}
+    url = (data.get('url') or '').strip()
+    selection = data.get('selection')
+
+    if not url and not selection:
+        return jsonify({'error': 'URL oder selection erforderlich'}), 400
+
+    def download_selected(sel):
+        try:
+            total = len(sel)
+            scraper.download_status.start_download()
+            if total == 0:
+                scraper.download_status.update(status_message='Keine Episoden ausgewaehlt', progress=0, total_episodes=0, state='idle')
+                return
+
+            first_item = sel[0] if sel else {}
+            label = (first_item.get('series_title') or 'Auswahl').strip() or 'Auswahl'
+            scraper.download_status.update(title=label, total_episodes=total, status_message=f'{total} Episoden geplant', state='running')
+            done = 0
+            for item in sel:
+                series = item.get('series_title') or label
+                try:
+                    season_num = int(item.get('season', 1) or 1)
+                except (TypeError, ValueError):
+                    season_num = 1
+                try:
+                    episode_num = int(item.get('episode', 0) or 0)
+                except (TypeError, ValueError):
+                    episode_num = 0
+                ep_title = item.get('title') or f'Episode {episode_num or "?"}'
+                ep_url = (item.get('episode_url') or '').strip()
+
+                if not ep_url:
+                    logger.warning('Episoden-Eintrag ohne episode_url uebersprungen')
+                    done += 1
+                    progress = int(done * 100 / max(total, 1))
+                    scraper.download_status.update(
+                        progress=progress,
+                        current_episode=done,
+                        total_episodes=total,
+                        episode_title=ep_title,
+                        status_message=f'{done}/{total} Episoden'
+                    )
+                    if socketio:
+                        socketio.emit('status_update', scraper.download_status.get_status())
+                        socketio.emit('episode_update', {
+                            'title': ep_title,
+                            'season': season_num,
+                            'episode': episode_num,
+                            'result': 'fail'
+                        })
+                    continue
+
+                series_path = scraper._get_series_path(series, ep_url)
+                season_dir = os.path.join(series_path, f'Staffel {season_num}')
+                os.makedirs(season_dir, exist_ok=True)
+
+                filename = f'S{season_num:02d}E{episode_num:02d} - {scraper._sanitize_filename(ep_title)}.mp4'
+                output_path = os.path.join(season_dir, filename)
+
+                stream_urls = scraper.extract_stream_urls(ep_url, scraper.get_base_url(ep_url))
+                if not stream_urls:
+                    logger.warning(f'Keine Streams fuer {ep_title}')
+                else:
+                    task = DownloadTask(
+                        title=ep_title,
+                        url=stream_urls[0],
+                        output_path=output_path,
+                        episode_num=episode_num,
+                        season_num=season_num,
+                        series_title=series,
+                        episode_url=ep_url,
+                        order_index=done + 1,
+                        total_count=total,
+                    )
+                    scraper._download_video(task, max_retries=3)
+
+                done += 1
+                progress = int(done * 100 / max(total, 1))
+                scraper.download_status.update(
+                    progress=progress,
+                    current_episode=done,
+                    total_episodes=total,
+                    episode_title=ep_title,
+                    status_message=f'{done}/{total} Episoden'
+                )
+                if socketio:
+                    socketio.emit('status_update', scraper.download_status.get_status())
+                    socketio.emit('episode_update', {
+                        'title': ep_title,
+                        'season': season_num,
+                        'episode': episode_num,
+                        'result': 'ok' if os.path.exists(output_path) else 'fail'
+                    })
+        finally:
+            scraper.download_status.finish_download()
+            if socketio:
+                socketio.emit('status_update', scraper.download_status.get_status())
+
+    if scraper.download_status.is_downloading:
+        return jsonify({'error': 'Es laeuft bereits ein Download!'}), 409
+
+    if selection:
+        thread = threading.Thread(target=download_selected, args=(selection,))
+        thread.daemon = True
+        thread.start()
+        return jsonify({'status': 'success', 'message': f'{len(selection)} Episoden gestartet'})
+
+    thread = threading.Thread(target=scraper.start_download, args=(url,))
+    thread.daemon = True
+    thread.start()
+    return jsonify({'status': 'success', 'message': 'Serien-Download gestartet'})
+
+
+
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -251,7 +352,7 @@ def download():
     try:
         data = request.get_json(force=True)
         url = (data or {}).get('url')
-        logger.debug(f"Download-Anfrage erhalten für URL: {url}")
+        logger.debug(f"Download-Anfrage erhalten fuer URL: {url}")
         if not url:
             logger.error('Keine URL in der Anfrage gefunden')
             return jsonify({'error': 'URL fehlt'}), 400
@@ -309,7 +410,7 @@ def get_media_details(media_id):
         # Hole die Staffeln
         seasons = media_db.get_seasons_by_media_id(media_id)
 
-        # Hole die Episoden für jede Staffel
+        # Hole die Episoden fuer jede Staffel
         for season in seasons:
             season['episodes'] = media_db.get_episodes_by_season_id(season['id'])
 
@@ -358,7 +459,7 @@ def get_media_stats():
 
 @app.route('/api/reset', methods=['POST'])
 def reset_session():
-    """Reset die Session für neue Downloads."""
+    """Reset die Session fuer neue Downloads."""
     try:
         if scraper.reset_session():
             return jsonify({'message': 'Session zurückgesetzt'}), 200
@@ -667,9 +768,9 @@ def enhance_media_metadata(media_id):
                 if enhanced_metadata:
                     success = media_db.update_media_metadata(media_id, enhanced_metadata)
                     if success:
-                        logger.info(f"Metadaten für '{media['title']}' erfolgreich verbessert")
+                        logger.info(f"Metadaten fuer '{media['title']}' erfolgreich verbessert")
                     else:
-                        logger.error(f"Fehler beim Aktualisieren der Metadaten für '{media['title']}'")
+                        logger.error(f"Fehler beim Aktualisieren der Metadaten fuer '{media['title']}'")
             except Exception as e:
                 logger.error(f"Fehler bei der Metadaten-Verbesserung: {str(e)}")
 
@@ -680,7 +781,7 @@ def enhance_media_metadata(media_id):
 
         return jsonify({
             'status': 'success',
-            'message': f"Metadaten-Verbesserung für '{media['title']}' gestartet"
+            'message': f"Metadaten-Verbesserung fuer '{media['title']}' gestartet"
         })
     except Exception as e:
         logger.error(f"Fehler beim Starten der Metadaten-Verbesserung: {str(e)}")
@@ -738,9 +839,9 @@ def enhance_episode_metadata(episode_id):
                 if enhanced_metadata:
                     success = media_db.update_episode_metadata(episode_id, enhanced_metadata)
                     if success:
-                        logger.info(f"Metadaten für Episode {season['season_number']}x{episode['episode_number']} erfolgreich verbessert")
+                        logger.info(f"Metadaten fuer Episode {season['season_number']}x{episode['episode_number']} erfolgreich verbessert")
                     else:
-                        logger.error(f"Fehler beim Aktualisieren der Metadaten für Episode {season['season_number']}x{episode['episode_number']}")
+                        logger.error(f"Fehler beim Aktualisieren der Metadaten fuer Episode {season['season_number']}x{episode['episode_number']}")
             except Exception as e:
                 logger.error(f"Fehler bei der Episoden-Metadaten-Verbesserung: {str(e)}")
 
@@ -751,7 +852,7 @@ def enhance_episode_metadata(episode_id):
 
         return jsonify({
             'status': 'success',
-            'message': f"Metadaten-Verbesserung für Episode {season['season_number']}x{episode['episode_number']} gestartet"
+            'message': f"Metadaten-Verbesserung fuer Episode {season['season_number']}x{episode['episode_number']} gestartet"
         })
     except Exception as e:
         logger.error(f"Fehler beim Starten der Episoden-Metadaten-Verbesserung: {str(e)}")
@@ -794,18 +895,18 @@ def enhance_all_media_metadata():
                         if enhanced_metadata:
                             success = media_db.update_media_metadata(media['id'], enhanced_metadata)
                             if success:
-                                logger.info(f"Metadaten für '{media['title']}' erfolgreich verbessert")
+                                logger.info(f"Metadaten fuer '{media['title']}' erfolgreich verbessert")
                             else:
-                                logger.error(f"Fehler beim Aktualisieren der Metadaten für '{media['title']}'")
+                                logger.error(f"Fehler beim Aktualisieren der Metadaten fuer '{media['title']}'")
 
                         # Kurze Pause, um die API nicht zu überlasten
                         import time
                         time.sleep(1)
                     except Exception as e:
-                        logger.error(f"Fehler bei der Metadaten-Verbesserung für '{media['title']}': {str(e)}")
+                        logger.error(f"Fehler bei der Metadaten-Verbesserung fuer '{media['title']}': {str(e)}")
                         continue
 
-                logger.info(f"Metadaten-Verbesserung für {len(media_to_enhance)} Medien abgeschlossen")
+                logger.info(f"Metadaten-Verbesserung fuer {len(media_to_enhance)} Medien abgeschlossen")
             except Exception as e:
                 logger.error(f"Fehler bei der Metadaten-Verbesserung: {str(e)}")
 
@@ -816,7 +917,7 @@ def enhance_all_media_metadata():
 
         return jsonify({
             'status': 'success',
-            'message': f"Metadaten-Verbesserung für {len(media_to_enhance)} Medien gestartet"
+            'message': f"Metadaten-Verbesserung fuer {len(media_to_enhance)} Medien gestartet"
         })
     except Exception as e:
         logger.error(f"Fehler beim Starten der Metadaten-Verbesserung: {str(e)}")
@@ -877,7 +978,7 @@ def manage_language_settings():
 
 @app.route('/download_voe', methods=['POST'])
 def download_voe():
-    """Endpoint für direkten VOE.sx Download"""
+    """Endpoint fuer direkten VOE.sx Download"""
     try:
         data = request.get_json()
         voe_url = data.get('url')
