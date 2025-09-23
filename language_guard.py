@@ -296,7 +296,7 @@ def audit_and_retry(download_func, candidate_urls: list[str]) -> tuple[str | Non
             print(f"Download failed for {url}: {e}")
             continue
     
-    return None, "no-valid-de-source"
+    return None, "no-valid-source-any-lang"
 
 
 
@@ -438,27 +438,27 @@ LANG_MAP = {lang: [pattern for pattern in patterns if pattern] for lang, pattern
 DUB_PATTERNS = {
     "de": [
         r"german\s*dub", r"ger\s*dub", r"de\s*dub", r"deutsch(?:e|er)?\s*dub",
-        r"gerdub", r"ger-dub", r"de-dub", r"deutsch.*dub", r"german.*dub",
-        r"dubbed.*german", r"dubbed.*deutsch",
+        r"gerdub", r"ger-dub", r"de-dub",
+        r"(?:deutsch|german).*dub", r"dub(?:bed)?\s*(?:deutsch|german|ger|de)\b",
         r"🇩🇪.*dub", r"flag.*de.*dub"
     ],
     "en": [
-        r"english\s*dub", r"eng\s*dub", r"en\s*dub", r"english.*dub", r"eng.*dub",
-        r"dubbed.*english", r"dubbed.*eng",
+        r"english\s*dub", r"eng\s*dub", r"en\s*dub",
+        r"(?:english|eng|en).*dub", r"dub(?:bed)?\s*(?:english|eng|en)\b",
         r"🇺🇸.*dub", r"flag.*en.*dub"
     ],
     "ja": [
-        r"japanese\s*dub", r"jap\s*dub", r"ja\s*dub", r"japanese.*dub", r"jap.*dub",
-        r"dubbed.*japanese", r"dubbed.*jap",
+        r"japanese\s*dub", r"jap\s*dub", r"ja\s*dub",
+        r"(?:japanese|jap|ja).*dub", r"dub(?:bed)?\s*(?:japanese|jap|ja)\b",
         r"🇯🇵.*dub", r"flag.*jp.*dub"
     ],
-    "fr": [r"french\s*dub", r"fra\s*dub", r"fr\s*dub", r"french.*dub"],
-    "es": [r"spanish\s*dub", r"spa\s*dub", r"es\s*dub", r"spanish.*dub"],
-    "it": [r"italian\s*dub", r"ita\s*dub", r"it\s*dub", r"italian.*dub"],
-    "pt": [r"portuguese\s*dub", r"por\s*dub", r"pt\s*dub", r"portuguese.*dub"],
-    "ru": [r"russian\s*dub", r"rus\s*dub", r"ru\s*dub", r"russian.*dub"],
-    "ko": [r"korean\s*dub", r"kor\s*dub", r"ko\s*dub", r"korean.*dub"],
-    "zh": [r"chinese\s*dub", r"chi\s*dub", r"zh\s*dub", r"chinese.*dub"],
+    "fr": [r"french\s*dub", r"fra\s*dub", r"fr\s*dub", r"(?:french|fra|fr).*dub"],
+    "es": [r"spanish\s*dub", r"spa\s*dub", r"es\s*dub", r"(?:spanish|spa|es).*dub"],
+    "it": [r"italian\s*dub", r"ita\s*dub", r"it\s*dub", r"(?:italian|ita|it).*dub"],
+    "pt": [r"portuguese\s*dub", r"por\s*dub", r"pt\s*dub", r"(?:portuguese|por|pt).*dub"],
+    "ru": [r"russian\s*dub", r"rus\s*dub", r"ru\s*dub", r"(?:russian|rus|ru).*dub"],
+    "ko": [r"korean\s*dub", r"kor\s*dub", r"ko\s*dub", r"(?:korean|kor|ko).*dub"],
+    "zh": [r"chinese\s*dub", r"chi\s*dub", r"zh\s*dub", r"(?:chinese|chi|zh).*dub"],
 }
 
 # Additional patterns for special cases
