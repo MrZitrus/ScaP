@@ -35,25 +35,28 @@ DEFAULT_LANG_PRIORITY = [
 ]
 
 def _get_lang_priority() -> list[tuple[str | None, str | None]]:
+    """Holt die Sprach-Priorität robust aus:
+      - ConfigManager.get_language_priority() (bevorzugt)
+      - oder direkt aus 'language_priority.priorities'
+      - sonst DEFAULT_LANG_PRIORITY
     """
-    Holt die Sprach-Priorität robust:
-    - Wenn config ein Objekt mit get_language_priority() ist -> verwende das.
-    - Sonst als Dict: 'language.priority' oder Default.
-    """
-    # Objekt-Methode?
     try:
         if hasattr(config, "get_language_priority"):
-            prio = config.get_language_priority()
-            if prio:
-                return prio
+            pr = config.get_language_priority()
+            if pr:
+                return pr
     except Exception:
         pass
 
-    # Dict-Config (mit Punkt-Keys)
     try:
-        prio = config.get("language.priority")
-        if prio:
-            return prio
+        pr = config.get("language_priority.priorities")
+        if pr:
+            out: list[tuple[str | None, str | None]] = []
+            for a, d in pr:
+                audio = str(a).lower() if a is not None else None
+                dub = str(d).lower() if d is not None else None
+                out.append((audio, dub))
+            return out
     except Exception:
         pass
 
@@ -301,7 +304,8 @@ def audit_and_retry(download_func, candidate_urls: list[str]) -> tuple[str | Non
 def audit_and_retry_with_priority(
     download_func,
     candidate_urls: list[str],
-    audio_priority: list[str] = ["de", "en", "ja"]
+    audio_priority: list[str] | None = None,
+    pair_priority: list[tuple[str | None, str | None]] | None = None,
 ) -> tuple[str | None, str]:
     """
     Testet URLs gegen eine Sprach-Priorität. Für jede Zielsprache:
@@ -310,10 +314,53 @@ def audit_and_retry_with_priority(
     - nutzt Whisper zur Verifikation
     - remuxt ggf. auf gewünschte Spur
     """
+    if pair_priority is None:
+        try:
+            pair_priority = _get_lang_priority()
+        except Exception:
+            pair_priority = None
+
+    if pair_priority:
+        for a_pref, d_pref in pair_priority:
+            tagset = {t.lower() for t in LANG_ISO_EQUIV.get(a_pref, {a_pref})} if a_pref else set()
+            whisper_accept = {a_pref} if a_pref else set()
+            need_dub = d_pref is not None
+
+            for url in candidate_urls:
+                try:
+                    path = download_func(url)
+                    if not path or not os.path.exists(path):
+                        continue
+
+                    ok, detail, fixed = verify_language(
+                        path,
+                        prefer_tags=tagset if tagset else None,
+                        require_dub=need_dub,
+                        accept_langs_639_1=whisper_accept if whisper_accept else None,
+                        reject_subs_only=True,
+                    )
+                    final_path = fixed or path
+                    if ok:
+                        logging.info("✓ [%s|%s] akzeptiert: %s (file=%s)", a_pref, d_pref, detail, final_path)
+                        return final_path, f"{a_pref}|{d_pref}:{detail}"
+
+                    logging.warning("✗ [%s|%s] abgelehnt: %s (url=%s, file=%s)", a_pref, d_pref, detail, url, path)
+                    try:
+                        Path(path).unlink(missing_ok=True)
+                        if fixed and fixed != path:
+                            Path(fixed).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    logging.warning("[%s|%s] Download failed for %s: %s", a_pref, d_pref, url, exc)
+                    continue
+
+        return None, "no-valid-source-any-lang"
+
     priority = list(audio_priority) if audio_priority else list(LANGUAGE_FALLBACK_PRIORITY)
 
     for target in priority:
-        tagset = {tag.lower() for tag in LANG_ISO_EQUIV.get(target, {target})}
+        tagset = {t.lower() for t in LANG_ISO_EQUIV.get(target, {target})}
         whisper_accept = {target.lower()}
 
         for url in candidate_urls:

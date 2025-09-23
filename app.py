@@ -17,7 +17,8 @@ from language_guard import pick_best, sort_by_preference, pick_best_with_quality
 config = get_config()
 
 # Konfiguriere Logging
-logging_level = getattr(logging, config.get('logging.level', 'DEBUG'))
+level_name = str(config.get('logging.level', 'DEBUG')).upper()
+logging_level = getattr(logging, level_name, logging.DEBUG)
 logging.basicConfig(
     level=logging_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -29,7 +30,15 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///streams.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'streamscraper-secret-key'
 db = SQLAlchemy(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
 
 # Models
 class Series(db.Model):
@@ -937,9 +946,9 @@ def handle_disconnect():
     logger.info(f"Client disconnected: {request.sid}")
 
 if __name__ == '__main__':
-    port = config.get('server.port')
-    debug = config.get('server.debug')
-    host = config.get('server.host')
+    port = int(config.get('server.port', 5000))
+    debug = _as_bool(config.get('server.debug', False))
+    host = config.get('server.host', '127.0.0.1')
 
     logger.info(f"Starting server on {host}:{port} (debug={debug})")
-    socketio.run(app, debug=debug, port=port, host=host, use_reloader=False)
+    socketio.run(app, host=host, port=port, debug=debug, use_reloader=False)
