@@ -9,6 +9,8 @@ import json
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
+from language_utils import language_codes_from_filename, subtitle_codes_from_filename
+
 logger = logging.getLogger(__name__)
 
 class MediaDatabase:
@@ -485,8 +487,10 @@ class MediaDatabase:
                                         pass
 
                                 # Prüfe, ob die Datei deutsche Synchronisation oder Untertitel hat
-                                has_german_dub = '[GerDub]' in filename
-                                has_german_sub = '[GerSub]' in filename
+                                audio_langs = language_codes_from_filename(filename)
+                                subtitle_langs = subtitle_codes_from_filename(filename)
+                                has_german_dub = 'de' in audio_langs
+                                has_german_sub = 'de' in subtitle_langs
 
                                 # Prüfe, ob bereits ein Eintrag für diese Episode existiert
                                 # (um doppelte Einträge zu vermeiden)

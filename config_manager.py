@@ -72,7 +72,8 @@ class ConfigManager:
                 "sample_seconds": 45,
                 "remux_to_de_if_present": True,
                 "accept_on_error": False,
-                "verify_with_whisper": True
+                "verify_with_whisper": True,
+                "fallback_priority": ["de", "en", "ja"]
             },
             "language_priority": {
                 "enabled": True,
@@ -143,6 +144,11 @@ class ConfigManager:
         # Language priority settings
         if os.getenv('LANGUAGE_PRIORITY_ENABLED'):
             self.config['language_priority']['enabled'] = os.getenv('LANGUAGE_PRIORITY_ENABLED').lower() in ('true', '1', 't')
+
+        if os.getenv('LANGUAGE_FALLBACK_PRIORITY'):
+            fallback = [part.strip().lower() for part in os.getenv('LANGUAGE_FALLBACK_PRIORITY').split(',') if part.strip()]
+            if fallback:
+                self.config['language']['fallback_priority'] = fallback
 
         # Server settings
         if os.getenv('FLASK_PORT'):

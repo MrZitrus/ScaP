@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import os
+import logging
 from pathlib import Path
 from config_manager import get_config
 
@@ -9,13 +10,20 @@ from config_manager import get_config
 config = get_config()
 
 # -------- Settings (können aus config.json überschrieben werden) ----------
-DESIRED_LANG_TAGS = set(config.get('language.prefer', ["de", "deu", "ger"]))
-WHISPER_ACCEPT_639_1 = {"de", "deu", "ger"}  # Accept multiple German variants
+DESIRED_LANG_TAGS = set(map(str.lower, config.get('language.prefer', ["de", "deu", "ger"])))
+WHISPER_ACCEPT_639_1 = set(map(str.lower, config.get('language.whisper_accept_639_1', ['de'])))
 SAMPLE_SECONDS = config.get('language.sample_seconds', 45)
 REMUX_TO_DE_IF_PRESENT = config.get('language.remux_to_de_if_present', True)
 VERIFY_WITH_WHISPER = config.get('language.verify_with_whisper', True)
 REQUIRE_DUB = config.get('language.require_dub', True)  # wenn True: Subs reichen NICHT
 
+LANG_ISO_EQUIV = {
+    "de": {"de", "deu", "ger"},
+    "en": {"en", "eng"},
+    "ja": {"ja", "jpn"},
+}
+
+LANGUAGE_FALLBACK_PRIORITY = [str(lang).lower() for lang in config.get('language.fallback_priority', ['de', 'en', 'ja'])]
 # Language Priority - loaded from config with safe defaults
 DEFAULT_LANG_PRIORITY = [
     ("de", None),     # Deutsch
@@ -176,55 +184,56 @@ def remux_to_de(video_in: str, meta=None, desired=DESIRED_LANG_TAGS) -> str | No
 
 
 # -------------------- Public API -----------------------------------------
-def verify_language(video_path: str, prefer_tags=None, require_dub=None, sample_seconds=None, remux=None) -> tuple[bool, str, str | None]:
-    """
-    Prüft Datei. Rückgabe: (ok, detail, fixed_path_or_none)
-    ok=True  -> akzeptiert
-    ok=False -> ablehnen
-    fixed_path_or_none -> Pfad zur remuxten Datei, falls angefallen
-    """
-    # Use provided parameters or fall back to defaults
-    desired_tags = prefer_tags if prefer_tags is not None else DESIRED_LANG_TAGS
+
+
+def verify_language(
+    video_path: str,
+    prefer_tags=None,
+    require_dub=None,
+    sample_seconds=None,
+    remux=None,
+    accept_langs_639_1: set[str] | None = None,
+    reject_subs_only: bool = True
+) -> tuple[bool, str, str | None]:
+    """Check file language. Returns (ok, detail, fixed_path_or_none)."""
+    desired_tags = {tag.lower() for tag in prefer_tags} if prefer_tags is not None else DESIRED_LANG_TAGS
     require_dub_setting = require_dub if require_dub is not None else REQUIRE_DUB
     sample_sec = sample_seconds if sample_seconds is not None else SAMPLE_SECONDS
     remux_setting = remux if remux is not None else REMUX_TO_DE_IF_PRESENT
-    
+    allowed_whisper = {tag.lower() for tag in (accept_langs_639_1 if accept_langs_639_1 is not None else WHISPER_ACCEPT_639_1)}
+
     try:
         meta = ffprobe_streams(video_path)
     except Exception as e:
         return False, f"ffprobe-error: {e}", None
 
-    # 1) Tag-basierter Schnellcheck (Dub vs. nur Subs)
-    de_audio_idxs = audio_lang_indices(meta, desired_tags)
-    if de_audio_idxs:
+    audio_idxs = audio_lang_indices(meta, desired_tags)
+    if audio_idxs:
         if remux_setting:
             out = remux_to_de(video_path, meta, desired_tags)
             if out:
                 return True, "tag-match-remuxed", out
         return True, "tag-match", None
 
-    # wenn Dub Pflicht und nur Subs vorhanden → ablehnen
-    if require_dub_setting and has_subtitles_in_lang(meta, desired_tags):
-        return False, "subs-only-de", None
+    if reject_subs_only and not audio_idxs and has_subtitles_in_lang(meta, desired_tags):
+        return False, "subs-only", None
 
-    # 2) Inhaltscheck (erste Audiospur)
-    lang = ""
-    mismatch_detail = 'unknown'
+    mismatch_detail = "unknown"
     if VERIFY_WITH_WHISPER:
         lang = content_language_guess(video_path, meta, sample_sec)
-        if lang in WHISPER_ACCEPT_639_1:
-            return True, f"content-match:{lang}", None
-        mismatch_detail = lang or 'unknown'
+        lang_lower = lang.lower() if lang else ""
+        if lang_lower and lang_lower in allowed_whisper:
+            return True, f"content-match:{lang_lower}", None
+        mismatch_detail = lang_lower or "unknown"
     else:
-        mismatch_detail = 'whisper-disabled'
+        mismatch_detail = "whisper-disabled"
 
-    # 3) Falls irgendwo DE-Audiospur, aber nicht aktiv -> remux versuchen
     if VERIFY_WITH_WHISPER and remux_setting:
         out = remux_to_de(video_path, meta, desired_tags)
         if out:
-            # kurze Gegenprobe
             lang2 = content_language_guess(out, sample_seconds=sample_sec)
-            if lang2 in WHISPER_ACCEPT_639_1:
+            lang2_lower = lang2.lower() if lang2 else ""
+            if lang2_lower and lang2_lower in allowed_whisper:
                 return True, "accepted-after-remux", out
 
     return False, f"mismatch:{mismatch_detail}", None
@@ -259,6 +268,52 @@ def audit_and_retry(download_func, candidate_urls: list[str]) -> tuple[str | Non
     
     return None, "no-valid-de-source"
 
+
+
+
+def audit_and_retry_with_priority(
+    download_func,
+    candidate_urls: list[str],
+    audio_priority: list[str] | None = None
+) -> tuple[str | None, str]:
+    """Try candidate URLs against a language priority order."""
+    priority = list(audio_priority) if audio_priority else list(LANGUAGE_FALLBACK_PRIORITY)
+
+    for target in priority:
+        tagset = {tag.lower() for tag in LANG_ISO_EQUIV.get(target, {target})}
+        whisper_accept = {target.lower()}
+
+        for url in candidate_urls:
+            try:
+                path = download_func(url)
+                if not path or not os.path.exists(path):
+                    continue
+
+                ok, detail, fixed = verify_language(
+                    path,
+                    prefer_tags=tagset,
+                    require_dub=False,
+                    accept_langs_639_1=whisper_accept,
+                    reject_subs_only=True
+                )
+                final_path = fixed or path
+                if ok:
+                    logging.info("ACCEPT [%s]: %s (file=%s)", target, detail, final_path)
+                    return final_path, f"{target}:{detail}"
+
+                logging.warning("REJECT [%s]: %s (url=%s, file=%s)", target, detail, url, path)
+                try:
+                    Path(path).unlink(missing_ok=True)
+                    if fixed and fixed != path:
+                        Path(fixed).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            except Exception as exc:
+                logging.warning("[%s] Download failed for %s: %s", target, url, exc)
+                continue
+
+    return None, "no-valid-source-any-lang"
 
 # ==================== NEW: Episode Variant Language Guard ====================
 

@@ -21,7 +21,8 @@ from yt_dlp import YoutubeDL
 from scrapers.voe_fallback import VoeFallbackDownloader
 from database import get_media_db, MediaDatabase
 from models import EpisodeVariant
-from language_guard import normalize_variants
+from language_guard import normalize_variants, verify_language, LANG_ISO_EQUIV, LANGUAGE_FALLBACK_PRIORITY
+from language_utils import rename_file_with_language_tag
 
 def _resolve_ff_binary(name: str) -> str | None:
     # 1) env override
@@ -551,86 +552,104 @@ class StreamScraper:
             logging.error(f"VOE fallback: Error - {str(e)}")
             return False
 
-    def _verify_german_audio(self, video_path: str, title: str) -> bool:
-        """
-        Prüft, ob die heruntergeladene Datei deutsche Audiospur hat.
-        
-        Args:
-            video_path (str): Pfad zur Video-Datei
-            title (str): Titel für Logging
-            
-        Returns:
-            bool: True wenn deutsche Audiospur vorhanden, False sonst
-        """
+
+
+
+    def _verify_german_audio(self, video_path: str, title: str) -> tuple[bool, str | None, str | None]:
+        """Check downloaded file for an accepted audio language."""
         try:
-            from language_guard import verify_language
-            
-            # Hole Language Guard Konfiguration
             lang_cfg = self.config.get('language', {})
-            prefer = set(map(str.lower, lang_cfg.get('prefer', ['de','deu','ger'])))
             require_dub = lang_cfg.get('require_dub', True)
             sample_seconds = lang_cfg.get('sample_seconds', 45)
             remux = lang_cfg.get('remux_to_de_if_present', True)
-            
-            logging.info(f"Prüfe deutsche Audiospur für: {title}")
-            ok, detail, fixed_path = verify_language(
-                video_path,
-                prefer_tags=prefer,
-                require_dub=require_dub,
-                sample_seconds=sample_seconds,
-                remux=remux
-            )
-            
-            if ok:
-                logging.info(f"✓ Deutsche Audiospur bestätigt für {title}: {detail}")
-                
-                # Falls eine remuxte Datei erstellt wurde, ersetze die ursprüngliche
-                if fixed_path and fixed_path != video_path:
-                    try:
-                        target_path = Path(video_path)
-                        replacement_path = Path(fixed_path)
-                        if not replacement_path.exists():
-                            logging.error(f"Remux-Ergebnis fehlt: {fixed_path}")
-                        else:
-                            replacement_path.replace(target_path)
-                            logging.info(f"Datei erfolgreich remuxed: {video_path}")
-                    except Exception as e:
-                        logging.error(f"Fehler beim Ersetzen der remuxten Datei: {e}")
-                
-                return True
-            else:
-                logging.warning(f"✗ Keine deutsche Audiospur gefunden für {title}: {detail}")
-                
-                # Unbrauchbare Datei über temporären Pfad löschen
-                try:
-                    target_path = Path(video_path)
-                    if target_path.exists():
-                        reject_path = target_path.with_suffix(target_path.suffix + '.reject')
-                        if reject_path.exists():
-                            reject_path.unlink(missing_ok=True)
-                        target_path.replace(reject_path)
+            priority_cfg = lang_cfg.get('fallback_priority', LANGUAGE_FALLBACK_PRIORITY)
+            audio_priority = [str(lang).lower() for lang in priority_cfg if isinstance(lang, str)]
+            if not audio_priority:
+                audio_priority = list(LANGUAGE_FALLBACK_PRIORITY)
+
+            logging.info("Checking audio languages for %s (priority: %s)", title, audio_priority)
+
+            last_detail = "no-match"
+            for target in audio_priority:
+                tagset = {tag.lower() for tag in LANG_ISO_EQUIV.get(target, {target})}
+                whisper_accept = {target.lower()}
+
+                ok, detail, fixed_path = verify_language(
+                    video_path,
+                    prefer_tags=tagset,
+                    require_dub=require_dub,
+                    sample_seconds=sample_seconds,
+                    remux=remux,
+                    accept_langs_639_1=whisper_accept,
+                    reject_subs_only=True
+                )
+                final_path = fixed_path or video_path
+                if ok:
+                    logging.info("[LANG OK %s] %s (file=%s)", target, detail, final_path)
+
+                    if fixed_path and fixed_path != video_path:
                         try:
-                            reject_path.unlink(missing_ok=True)
-                        except Exception as cleanup_err:
-                            logging.warning(f"Temporäre Reject-Datei konnte nicht entfernt werden: {cleanup_err}")
-                        logging.info(f"Datei ohne deutsche Audiospur gelöscht: {video_path}")
-                except Exception as e:
-                    logging.error(f"Fehler beim Löschen der Datei: {e}")
+                            target_path = Path(video_path)
+                            replacement_path = Path(fixed_path)
+                            if not replacement_path.exists():
+                                logging.error("Remux output missing: %s", fixed_path)
+                            else:
+                                replacement_path.replace(target_path)
+                                logging.info("Replaced file with remuxed audio: %s", video_path)
+                        except Exception as exc:
+                            logging.error("Failed to replace remuxed file: %s", exc)
 
+                    return True, target, detail
 
-                return False
-                
+                last_detail = f"{target}:{detail}"
+                logging.warning("[LANG FAIL %s] %s (file=%s)", target, detail, video_path)
+
+            logging.warning("No accepted audio track for %s (last detail: %s)", title, last_detail)
+
+            try:
+                target_path = Path(video_path)
+                if target_path.exists():
+                    reject_path = target_path.with_suffix(target_path.suffix + '.reject')
+                    if reject_path.exists():
+                        reject_path.unlink(missing_ok=True)
+                    target_path.replace(reject_path)
+                    try:
+                        reject_path.unlink(missing_ok=True)
+                    except Exception as cleanup_err:
+                        logging.warning("Could not remove temporary reject file: %s", cleanup_err)
+                    logging.info("Removed file without accepted audio: %s", video_path)
+            except Exception as exc:
+                logging.error("Failed to delete rejected file: %s", exc)
+
+            return False, None, last_detail
+
         except ImportError:
-            logging.warning("Language Guard nicht verfügbar - überspringe Sprachprüfung")
-            # Konfigurierbar: bei fehlender Language Guard akzeptieren oder ablehnen
+            logging.warning("Language Guard unavailable - skipping language validation")
             accept_on_error = self.config.get('language.accept_on_error', False)
-            return accept_on_error
-        except Exception as e:
-            logging.error(f"Fehler bei der Sprachprüfung für {title}: {e}")
-            # Konfigurierbar: bei Fehlern akzeptieren oder ablehnen
+            return accept_on_error, None, "language-guard-missing"
+        except Exception as exc:
+            logging.error("Error during language validation for %s: %s", title, exc)
             accept_on_error = self.config.get('language.accept_on_error', False)
-            return accept_on_error
+            return accept_on_error, None, f"error:{exc}"
 
+    def _apply_language_tag(self, file_path: str, lang_code: str | None) -> str:
+        """Rename downloaded file so the language tag matches the detected audio."""
+        if not file_path or not os.path.exists(file_path):
+            return file_path
+        if not lang_code:
+            return file_path
+
+        lang_code = lang_code.lower()
+        try:
+            new_path = rename_file_with_language_tag(file_path, lang_code, self._sanitize_filename)
+        except Exception as exc:
+            logging.error("Failed to rename file for language tag (%s): %s", lang_code, exc)
+            return file_path
+
+        if new_path != file_path:
+            logging.info("Renamed file to reflect audio language [%s]: %s -> %s", lang_code, os.path.basename(file_path), os.path.basename(new_path))
+            return new_path
+        return file_path
     def _download_video(self, task: DownloadTask, max_retries: int = 3) -> bool:
         """Video von VOE.sx oder maxfinishseveral.com herunterladen"""
         retries = 0
@@ -693,10 +712,14 @@ class StreamScraper:
                             logging.info("Real-Debrid fehlgeschlagen für VOE.sx Link, versuche direkte Fallback-Methode...")
                             if self._try_voe_fallback(original_url, task.output_path, task.title):
                                 logging.debug("VOE.sx Fallback erfolgreich, prüfe deutsche Audiospur...")
-                                if self._verify_german_audio(task.output_path, task.title):
+                                ok_lang, lang_code, lang_detail = self._verify_german_audio(task.output_path, task.title)
+                                if ok_lang:
+                                    updated_path = self._apply_language_tag(task.output_path, lang_code)
+                                    if updated_path:
+                                        task.output_path = updated_path
                                     return True
                                 else:
-                                    logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
+                                    logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den Sprachanforderungen: {lang_detail}")
                                     return False
 
                         continue
@@ -716,11 +739,14 @@ class StreamScraper:
                     logging.info(f"Download erfolgreich: {task.title}")
                     
                     # Language Guard: Prüfe deutsche Audiospur
-                    if self._verify_german_audio(task.output_path, task.title):
+                    ok_lang, lang_code, lang_detail = self._verify_german_audio(task.output_path, task.title)
+                    if ok_lang:
+                        updated_path = self._apply_language_tag(task.output_path, lang_code)
+                        if updated_path:
+                            task.output_path = updated_path
                         return True
                     else:
-                        # Datei entspricht nicht den Sprachanforderungen
-                        logging.warning(f"Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
+                        logging.warning(f"Datei {task.title} entspricht nicht den Sprachanforderungen: {lang_detail}")
                         return False
 
                 except Exception as e:
@@ -746,11 +772,15 @@ class StreamScraper:
                         logging.debug(f"Versuche VOE Fallback mit ursprünglicher URL: {url_to_try}")
                         if self._try_voe_fallback(url_to_try, task.output_path, task.title):
                             logging.debug("VOE.sx Fallback erfolgreich, prüfe deutsche Audiospur...")
-                            if self._verify_german_audio(task.output_path, task.title):
+                            ok_lang, lang_code, lang_detail = self._verify_german_audio(task.output_path, task.title)
+                            if ok_lang:
+                                updated_path = self._apply_language_tag(task.output_path, lang_code)
+                                if updated_path:
+                                    task.output_path = updated_path
                                 logging.debug("Download als erfolgreich markiert.")
                                 return True
                             else:
-                                logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den deutschen Sprachanforderungen")
+                                logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den Sprachanforderungen: {lang_detail}")
                                 return False
 
                     return False
@@ -1380,10 +1410,10 @@ class StreamScraper:
                     )
                     if self._download_video(task, max_retries=3):
                         success = True
-                        logging.debug(f"✓ Erfolgreicher Download mit Mirror {mirror_idx + 1}: {episode_title}")
+                        logging.debug(f"Mirror {mirror_idx + 1} succeeded: {episode_title}")
                         break
                     else:
-                        logging.warning(f"✗ Mirror {mirror_idx + 1} fehlgeschlagen für {episode_title}")
+                        logging.warning(f"Mirror {mirror_idx + 1} failed: {episode_title}")
                 
                 if not success:
                     failed_downloads.append(f"S{season_num:02d}E{episode_num:02d} - {episode_title}")

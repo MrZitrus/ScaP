@@ -16,10 +16,10 @@
         "api_key": "3MPG4CODV34NE3TQOSLN2ZF6Y4YCPTPQJLLEYW3JVATBW7TWU3PQ"
     },
     "jellyfin": {
-        "enabled": false,
-        "url": "",
-        "api_key": "",
-        "user_id": ""
+        "enabled": true,
+        "url": "http://localhost:8096/",
+        "api_key": "bb7a4258f47b40dca98033d6edb97000",
+        "user_id": "Xhafer"
     },
     "logging": {
         "level": "DEBUG",
@@ -37,11 +37,16 @@
             "deu",
             "ger"
         ],
-        "require_dub": true,
+        "require_dub": false,
         "sample_seconds": 45,
         "remux_to_de_if_present": true,
         "accept_on_error": false,
-        "verify_with_whisper": true
+        "verify_with_whisper": true,
+        "fallback_priority": [
+            "de",
+            "en",
+            "ja"
+        ]
     },
     "scraper": {
         "language_check_domains": [
