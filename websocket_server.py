@@ -88,4 +88,4 @@ def broadcast_error(error_data):
 if __name__ == '__main__':
     port = 8082
     logger.info(f"Starting WebSocket server on port {port}")
-    socketio.run(app, host='0.0.0.0', port=port, debug=True)
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, use_reloader=False)

@@ -24,9 +24,26 @@ class MediaDatabase:
         self.db_path = db_path
         self._create_tables()
 
+    def _get_connection(self) -> sqlite3.Connection:
+        """
+        Erstelle eine robuste Datenbankverbindung mit WAL-Modus und Timeouts.
+
+        Returns:
+            sqlite3.Connection: Datenbankverbindung
+        """
+        conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
+        cursor = conn.cursor()
+
+        # Aktiviere WAL-Modus für bessere Robustheit
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        cursor.execute("PRAGMA busy_timeout=5000;")
+
+        return conn
+
     def _create_tables(self) -> None:
         """Erstelle die benötigten Tabellen, falls sie nicht existieren."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         # Tabelle für Serien/Animes
@@ -98,7 +115,7 @@ class MediaDatabase:
         Returns:
             int: ID des hinzugefügten Eintrags
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         try:
@@ -128,7 +145,7 @@ class MediaDatabase:
         Returns:
             int: ID des hinzugefügten Eintrags
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         try:
@@ -165,7 +182,7 @@ class MediaDatabase:
         Returns:
             int: ID des hinzugefügten Eintrags
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         try:
@@ -197,7 +214,7 @@ class MediaDatabase:
         Returns:
             Optional[Dict[str, Any]]: Informationen zur Serie/zum Anime oder None
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -220,7 +237,7 @@ class MediaDatabase:
         Returns:
             Optional[Dict[str, Any]]: Informationen zur Serie/zum Anime oder None
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -243,7 +260,7 @@ class MediaDatabase:
         Returns:
             Optional[Dict[str, Any]]: Informationen zur Staffel oder None
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -266,7 +283,7 @@ class MediaDatabase:
         Returns:
             Optional[Dict[str, Any]]: Informationen zur Episode oder None
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -289,7 +306,7 @@ class MediaDatabase:
         Returns:
             List[Dict[str, Any]]: Liste der Staffeln
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -310,7 +327,7 @@ class MediaDatabase:
         Returns:
             List[Dict[str, Any]]: Liste der Episoden
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -332,12 +349,12 @@ class MediaDatabase:
         Returns:
             Optional[Dict[str, Any]]: Informationen zur Episode oder None
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
         cursor.execute("SELECT * FROM episodes WHERE season_id = ? AND episode_number = ?",
-                      (season_id, episode_number))
+                       (season_id, episode_number))
         result = cursor.fetchone()
 
         conn.close()
@@ -380,7 +397,7 @@ class MediaDatabase:
             return 0, 0, 0
 
         # Erstelle eine Datenbankverbindung
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         media_count = 0
@@ -520,7 +537,7 @@ class MediaDatabase:
         Returns:
             bool: True bei Erfolg, False bei Fehler
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         try:
@@ -548,7 +565,7 @@ class MediaDatabase:
         Returns:
             bool: True bei Erfolg, False bei Fehler
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         try:
@@ -614,7 +631,7 @@ class MediaDatabase:
         Returns:
             bool: True bei Erfolg, False bei Fehler
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         try:
@@ -651,7 +668,7 @@ class MediaDatabase:
         Returns:
             List[Dict[str, Any]]: Liste aller Serien und Animes
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -689,7 +706,7 @@ class MediaDatabase:
         Returns:
             int: Anzahl der Episoden
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         cursor.execute("SELECT COUNT(*) FROM episodes")
@@ -706,7 +723,7 @@ class MediaDatabase:
         Returns:
             int: Gesamtgröße in Bytes
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         cursor.execute("SELECT SUM(file_size) FROM episodes")

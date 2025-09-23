@@ -942,4 +942,4 @@ if __name__ == '__main__':
     host = config.get('server.host')
 
     logger.info(f"Starting server on {host}:{port} (debug={debug})")
-    socketio.run(app, debug=debug, port=port, host=host)
+    socketio.run(app, debug=debug, port=port, host=host, use_reloader=False)
