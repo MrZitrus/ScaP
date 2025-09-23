@@ -439,26 +439,26 @@ DUB_PATTERNS = {
     "de": [
         r"german\s*dub", r"ger\s*dub", r"de\s*dub", r"deutsch(?:e|er)?\s*dub",
         r"gerdub", r"ger-dub", r"de-dub", r"deutsch.*dub", r"german.*dub",
-        r"dubbed.*german", r"dubbed.*deutsch", r"dub.*ger", r"dub.*de",
+        r"dubbed.*german", r"dubbed.*deutsch",
         r"🇩🇪.*dub", r"flag.*de.*dub"
     ],
     "en": [
         r"english\s*dub", r"eng\s*dub", r"en\s*dub", r"english.*dub", r"eng.*dub",
-        r"dubbed.*english", r"dubbed.*eng", r"dub.*en", r"dub.*english",
+        r"dubbed.*english", r"dubbed.*eng",
         r"🇺🇸.*dub", r"flag.*en.*dub"
     ],
     "ja": [
         r"japanese\s*dub", r"jap\s*dub", r"ja\s*dub", r"japanese.*dub", r"jap.*dub",
-        r"dubbed.*japanese", r"dubbed.*jap", r"dub.*ja", r"dub.*japanese",
+        r"dubbed.*japanese", r"dubbed.*jap",
         r"🇯🇵.*dub", r"flag.*jp.*dub"
     ],
-    "fr": [r"french\s*dub", r"fra\s*dub", r"fr\s*dub", r"french.*dub", r"dub.*french"],
-    "es": [r"spanish\s*dub", r"spa\s*dub", r"es\s*dub", r"spanish.*dub", r"dub.*spanish"],
-    "it": [r"italian\s*dub", r"ita\s*dub", r"it\s*dub", r"italian.*dub", r"dub.*italian"],
-    "pt": [r"portuguese\s*dub", r"por\s*dub", r"pt\s*dub", r"portuguese.*dub", r"dub.*portuguese"],
-    "ru": [r"russian\s*dub", r"rus\s*dub", r"ru\s*dub", r"russian.*dub", r"dub.*russian"],
-    "ko": [r"korean\s*dub", r"kor\s*dub", r"ko\s*dub", r"korean.*dub", r"dub.*korean"],
-    "zh": [r"chinese\s*dub", r"chi\s*dub", r"zh\s*dub", r"chinese.*dub", r"dub.*chinese"],
+    "fr": [r"french\s*dub", r"fra\s*dub", r"fr\s*dub", r"french.*dub"],
+    "es": [r"spanish\s*dub", r"spa\s*dub", r"es\s*dub", r"spanish.*dub"],
+    "it": [r"italian\s*dub", r"ita\s*dub", r"it\s*dub", r"italian.*dub"],
+    "pt": [r"portuguese\s*dub", r"por\s*dub", r"pt\s*dub", r"portuguese.*dub"],
+    "ru": [r"russian\s*dub", r"rus\s*dub", r"ru\s*dub", r"russian.*dub"],
+    "ko": [r"korean\s*dub", r"kor\s*dub", r"ko\s*dub", r"korean.*dub"],
+    "zh": [r"chinese\s*dub", r"chi\s*dub", r"zh\s*dub", r"chinese.*dub"],
 }
 
 # Additional patterns for special cases

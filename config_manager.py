@@ -6,7 +6,7 @@ Combines settings from .env, config.json, and environment variables.
 import os
 import json
 import logging
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 # Configure logging
