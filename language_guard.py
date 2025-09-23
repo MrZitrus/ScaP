@@ -10,11 +10,46 @@ config = get_config()
 
 # -------- Settings (können aus config.json überschrieben werden) ----------
 DESIRED_LANG_TAGS = set(config.get('language.prefer', ["de", "deu", "ger"]))
-WHISPER_ACCEPT_639_1 = {"de"}                # Whisper liefert 'de' (639-1)
+WHISPER_ACCEPT_639_1 = {"de", "deu", "ger"}  # Accept multiple German variants
 SAMPLE_SECONDS = config.get('language.sample_seconds', 45)
 REMUX_TO_DE_IF_PRESENT = config.get('language.remux_to_de_if_present', True)
 VERIFY_WITH_WHISPER = config.get('language.verify_with_whisper', True)
 REQUIRE_DUB = config.get('language.require_dub', True)  # wenn True: Subs reichen NICHT
+
+# Language Priority - loaded from config with safe defaults
+DEFAULT_LANG_PRIORITY = [
+    ("de", None),     # Deutsch
+    ("en", "de"),     # Englisch mit German Dub (falls du das so modellierst)
+    ("en", None),     # Englisch
+    ("ja", "de"),     # Japanisch mit German Dub
+    ("ja", "en"),     # Japanisch mit English Dub
+    ("ja", None),     # Japanisch (Original)
+]
+
+def _get_lang_priority() -> list[tuple[str | None, str | None]]:
+    """
+    Holt die Sprach-Priorität robust:
+    - Wenn config ein Objekt mit get_language_priority() ist -> verwende das.
+    - Sonst als Dict: 'language.priority' oder Default.
+    """
+    # Objekt-Methode?
+    try:
+        if hasattr(config, "get_language_priority"):
+            prio = config.get_language_priority()
+            if prio:
+                return prio
+    except Exception:
+        pass
+
+    # Dict-Config (mit Punkt-Keys)
+    try:
+        prio = config.get("language.priority")
+        if prio:
+            return prio
+    except Exception:
+        pass
+
+    return DEFAULT_LANG_PRIORITY
 
 # ------------------------ Helpers ----------------------------------------
 def _run(cmd):
@@ -231,15 +266,9 @@ import re
 import requests
 from typing import Iterable, List, Optional, Tuple, Dict, Any
 from models import EpisodeVariant
-from config_manager import get_config
-
-# Load configuration
-config = get_config()
 
 # 1) Language Priority (Audio, Dub) - loaded from config
-def _get_lang_priority() -> List[Tuple[Optional[str], Optional[str]]]:
-    """Get language priority from configuration."""
-    return config.get_language_priority()
+# Note: Using the robust _get_lang_priority() function defined above
 
 # 2) Enhanced patterns for language detection from titles/labels/tracks
 LANG_MAP = {
@@ -504,25 +533,24 @@ def pick_best(variants: Iterable[EpisodeVariant]) -> Optional[EpisodeVariant]:
     Select the best variant according to configured language priority.
     """
     vs = list(variants)
-    lang_priority = _get_lang_priority()
-
-    if not lang_priority:
-        return None
+    prio = _get_lang_priority()
+    if not prio or not vs:
+        return vs[0] if vs else None
 
     # Exact matches of priorities
-    for (a_pref, d_pref) in lang_priority:
+    for (a_pref, d_pref) in prio:
         for v in vs:
             if v.audio_lang == a_pref and v.dub_lang == d_pref:
                 return v
 
     # Tolerance: If dub_lang unknown (None) but label suggests dub (edge cases),
     # try fallback matches on audio_lang only:
-    for (a_pref, d_pref) in lang_priority:
+    for (a_pref, d_pref) in prio:
         if d_pref is None:
             for v in vs:
                 if v.audio_lang == a_pref:
                     return v
-    return None
+    return vs[0] if vs else None
 
 def sort_by_preference(variants: Iterable[EpisodeVariant]) -> List[EpisodeVariant]:
     """Sort variants by language preference."""
@@ -566,21 +594,22 @@ def pick_best_with_quality(variants: Iterable[EpisodeVariant]) -> Optional[Episo
 
 # ==================== M3U8/HLS Track Parsing Support ====================
 
-def parse_m3u8_playlist(playlist_url: str) -> Optional[Dict[str, Any]]:
+def parse_m3u8_playlist(playlist_url: str, headers: Optional[dict] = None) -> Optional[Dict[str, Any]]:
     """
     Parse an M3U8 playlist and extract audio track information.
 
     Args:
         playlist_url: URL to the M3U8 playlist
+        headers: Optional headers for the request
 
     Returns:
         Dict containing playlist info and audio tracks, or None if parsing fails
     """
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(playlist_url, headers=headers, timeout=10)
+        base_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        if headers:
+            base_headers.update(headers)
+        response = requests.get(playlist_url, headers=base_headers, timeout=10)
         response.raise_for_status()
 
         playlist_content = response.text
@@ -654,82 +683,78 @@ def _parse_ext_x_stream_inf(line: str) -> Optional[Dict[str, Any]]:
 
     return stream_info if stream_info else None
 
-def extract_audio_info_from_m3u8(playlist_url: str) -> Tuple[Optional[str], Optional[str]]:
+def extract_audio_info_from_m3u8(playlist_url: str, headers: Optional[dict] = None) -> Tuple[Optional[str], Optional[str]]:
     """
-    Extract audio and dub language information from an M3U8 playlist.
-
-    Args:
-        playlist_url: URL to the M3U8 playlist
-
-    Returns:
-        Tuple of (audio_lang, dub_lang) or (None, None) if not found
+    Gibt (audio_lang, dub_lang) zurück. In HLS beschreibt LANGUAGE die Sprache der
+    Audiospur selbst. Ein 'German Dub' ist daher LANGUAGE='de' -> audio_lang='de', dub_lang=None.
     """
-    playlist_info = parse_m3u8_playlist(playlist_url)
-    if not playlist_info:
+    info = parse_m3u8_playlist(playlist_url, headers)
+    if not info:
         return None, None
 
     audio_lang = None
-    dub_lang = None
+    dub_lang = None  # In HLS nicht verlässlich ableitbar
 
-    # Look for audio tracks with language information
-    for track in playlist_info.get('audio_tracks', []):
-        language = track.get('LANGUAGE')
-        name = track.get('NAME', '')
+    # Nimm bevorzugt eine DE-Spur, sonst EN, sonst JA (oder erste verfügbare)
+    preferred = ["de", "en", "ja"]
 
-        if language:
-            # Check if this is a dubbed track
-            if _match_any(name, [r"dub", r"german", r"deutsch"]):
-                if language.lower() in ['ja', 'japanese']:
-                    audio_lang = 'ja'
-                    dub_lang = 'de'
-                elif language.lower() in ['en', 'english']:
-                    audio_lang = 'en'
-                    dub_lang = 'de'
-            else:
-                # This is the original audio
-                audio_lang = language.lower()
+    tracks = info.get("audio_tracks", [])
+    # Normalisiere Sprache
+    def norm(lang: str | None) -> str | None:
+        if not lang:
+            return None
+        l = lang.lower()
+        aliases = {"deu":"de", "ger":"de", "eng":"en", "jpn":"ja"}
+        return aliases.get(l, l)
 
-    return audio_lang, dub_lang
+    # 1) Versuche gezielt preferred
+    for pref in preferred:
+        for t in tracks:
+            L = norm(t.get("LANGUAGE"))
+            if L == pref:
+                return L, None
 
-def enhance_variant_with_m3u8_info(variant: EpisodeVariant) -> EpisodeVariant:
+    # 2) Fallback erste Spur mit Sprache
+    for t in tracks:
+        L = norm(t.get("LANGUAGE"))
+        if L:
+            return L, None
+
+    return None, None
+
+def enhance_variant_with_m3u8_info(variant: EpisodeVariant, headers: Optional[dict] = None) -> EpisodeVariant:
     """
     Enhance an EpisodeVariant with information from M3U8 playlist if URL is M3U8.
 
     Args:
         variant: The EpisodeVariant to enhance
+        headers: Optional headers for the request
 
     Returns:
         Enhanced EpisodeVariant
     """
-    if not variant.url.endswith('.m3u8') and '/hls/' not in variant.url:
+    if not (variant.url.endswith('.m3u8') or '/hls/' in variant.url):
         return variant
 
     try:
-        audio_lang, dub_lang = extract_audio_info_from_m3u8(variant.url)
-
-        # Only update if we don't already have better information
-        if audio_lang and not variant.audio_lang:
-            variant.audio_lang = audio_lang
-        if dub_lang and not variant.dub_lang:
-            variant.dub_lang = dub_lang
-
-        # Add M3U8 info to extra data
+        # Use the corrected extract_audio_info_from_m3u8 function
+        a, d = extract_audio_info_from_m3u8(variant.url)
+        if a and not variant.audio_lang:
+            variant.audio_lang = a
+        if d and not variant.dub_lang:
+            variant.dub_lang = d
         variant.extra['m3u8_parsed'] = True
-        variant.extra['m3u8_audio_tracks'] = audio_lang
-        variant.extra['m3u8_dub_tracks'] = dub_lang
-
     except Exception as e:
-        print(f"Error enhancing variant with M3U8 info: {e}")
         variant.extra['m3u8_parse_error'] = str(e)
-
     return variant
 
-def normalize_variants_with_m3u8(variants: Iterable[EpisodeVariant]) -> List[EpisodeVariant]:
+def normalize_variants_with_m3u8(variants: Iterable[EpisodeVariant], headers: Optional[dict] = None) -> List[EpisodeVariant]:
     """
     Normalize variants and enhance M3U8 variants with playlist information.
 
     Args:
         variants: List of EpisodeVariant objects
+        headers: Optional headers for M3U8 requests
 
     Returns:
         List of normalized and enhanced EpisodeVariant objects
@@ -740,7 +765,7 @@ def normalize_variants_with_m3u8(variants: Iterable[EpisodeVariant]) -> List[Epi
     enhanced = []
     for variant in normalized:
         if variant.url.endswith('.m3u8') or '/hls/' in variant.url:
-            enhanced_variant = enhance_variant_with_m3u8_info(variant)
+            enhanced_variant = enhance_variant_with_m3u8_info(variant, headers)
             enhanced.append(enhanced_variant)
         else:
             enhanced.append(variant)
