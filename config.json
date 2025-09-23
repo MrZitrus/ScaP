@@ -1,0 +1,60 @@
+{
+    "download": {
+        "directory": "D:\\Serien",
+        "max_parallel_downloads": 3,
+        "max_parallel_extractions": 5,
+        "scan_on_startup": true,
+        "db_path": "media.db"
+    },
+    "server": {
+        "port": 5000,
+        "debug": true,
+        "host": "127.0.0.1"
+    },
+    "real_debrid": {
+        "enabled": true,
+        "api_key": "3MPG4CODV34NE3TQOSLN2ZF6Y4YCPTPQJLLEYW3JVATBW7TWU3PQ"
+    },
+    "jellyfin": {
+        "enabled": false,
+        "url": "",
+        "api_key": "",
+        "user_id": ""
+    },
+    "logging": {
+        "level": "DEBUG",
+        "file": "logs/streamscraper.log"
+    },
+    "gemini": {
+        "enabled": false,
+        "api_key": "AIzaSyAj5-0iw3fwz08ffikbR3DcqkheczFO0Z0",
+        "model": "gemini-2.5-pro-exp-03-25",
+        "auto_enhance_metadata": false
+    },
+    "language": {
+        "prefer": [
+            "de",
+            "deu",
+            "ger"
+        ],
+        "require_dub": true,
+        "sample_seconds": 45,
+        "remux_to_de_if_present": true,
+        "accept_on_error": false,
+        "verify_with_whisper": true
+    },
+    "scraper": {
+        "language_check_domains": [
+            "maxfinishseveral.com",
+            "kristiesoundsimply.com"
+        ],
+        "language_preference": {
+            "prefer_german_dub": true,
+            "allow_german_sub": true,
+            "allow_japanese_audio": true,
+            "allow_english_sub": true
+        },
+        "overwrite_existing": true,
+        "force_download": true
+    }
+}

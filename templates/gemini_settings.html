@@ -1,0 +1,160 @@
+{% extends 'base.html' %}
+
+{% block title %}Gemini API Einstellungen{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Gemini API Einstellungen</h1>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>Gemini API Konfiguration</h5>
+        </div>
+        <div class="card-body">
+            <form id="geminiSettingsForm">
+                <div class="form-group mb-3">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="geminiEnabled" {% if gemini_enabled %}checked{% endif %}>
+                        <label class="form-check-label" for="geminiEnabled">Gemini API aktivieren</label>
+                    </div>
+                </div>
+
+                <div class="form-group mb-3">
+                    <label for="geminiApiKey">API-Schlüssel</label>
+                    <input type="password" class="form-control" id="geminiApiKey" value="{{ gemini_api_key }}" placeholder="Gemini API-Schlüssel eingeben">
+                    <small class="form-text text-muted">
+                        Du kannst einen kostenlosen API-Schlüssel für Gemini 2.5 Pro unter
+                        <a href="https://ai.google.dev/" target="_blank">https://ai.google.dev/</a> erhalten.
+                    </small>
+                </div>
+
+                <div class="form-group mb-3">
+                    <label for="geminiModel">Modell</label>
+                    <select class="form-control" id="geminiModel">
+                        <option value="gemini-1.5-pro-latest" {% if gemini_model == 'gemini-1.5-pro-latest' %}selected{% endif %}>Gemini 1.5 Pro (neueste Version)</option>
+                        <option value="gemini-1.5-flash-latest" {% if gemini_model == 'gemini-1.5-flash-latest' %}selected{% endif %}>Gemini 1.5 Flash (schneller, weniger genau)</option>
+                        <option value="gemini-2.5-pro-exp-03-25" {% if gemini_model == 'gemini-2.5-pro-exp-03-25' %}selected{% endif %}>Gemini 2.5 Pro (experimentelle Version)</option>
+                    </select>
+                </div>
+
+                <div class="form-group mb-3">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="autoEnhanceMetadata" {% if auto_enhance_metadata %}checked{% endif %}>
+                        <label class="form-check-label" for="autoEnhanceMetadata">Metadaten automatisch verbessern</label>
+                    </div>
+                    <small class="form-text text-muted">
+                        Wenn aktiviert, werden Metadaten automatisch nach dem Hinzufügen neuer Serien/Animes verbessert.
+                    </small>
+                </div>
+
+                <button type="submit" class="btn btn-primary">Speichern</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>Metadaten-Verbesserung</h5>
+        </div>
+        <div class="card-body">
+            <p>
+                Mit der Gemini API können Metadaten für deine Serien und Animes automatisch verbessert werden.
+                Die API kann Beschreibungen, Genres, Bewertungen und mehr hinzufügen.
+            </p>
+
+            <button id="enhanceAllBtn" class="btn btn-success mb-2" {% if not gemini_enabled %}disabled{% endif %}>
+                Alle Metadaten verbessern
+            </button>
+
+            <div class="progress mb-3" style="display: none;" id="enhanceProgress">
+                <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%"></div>
+            </div>
+
+            <div id="enhanceStatus" class="alert alert-info" style="display: none;"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Formular absenden
+        document.getElementById('geminiSettingsForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            const settings = {
+                enabled: document.getElementById('geminiEnabled').checked,
+                api_key: document.getElementById('geminiApiKey').value,
+                model: document.getElementById('geminiModel').value,
+                auto_enhance_metadata: document.getElementById('autoEnhanceMetadata').checked
+            };
+
+            fetch('/api/settings/gemini', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(settings)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('Einstellungen erfolgreich gespeichert');
+                    // Aktualisiere den Button-Status
+                    document.getElementById('enhanceAllBtn').disabled = !settings.enabled;
+                } else {
+                    alert('Fehler beim Speichern der Einstellungen: ' + (data.error || 'Unbekannter Fehler'));
+                }
+            })
+            .catch(error => {
+                console.error('Fehler:', error);
+                alert('Fehler beim Speichern der Einstellungen');
+            });
+        });
+
+        // Alle Metadaten verbessern
+        document.getElementById('enhanceAllBtn').addEventListener('click', function() {
+            if (!confirm('Möchtest du die Metadaten aller Serien und Animes verbessern? Dies kann je nach Anzahl der Einträge einige Zeit dauern.')) {
+                return;
+            }
+
+            // Zeige Fortschrittsanzeige
+            document.getElementById('enhanceProgress').style.display = 'block';
+            document.getElementById('enhanceStatus').style.display = 'block';
+            document.getElementById('enhanceStatus').textContent = 'Metadaten-Verbesserung gestartet...';
+
+            // Deaktiviere Button während der Verarbeitung
+            this.disabled = true;
+
+            fetch('/api/media/enhance/all', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    document.getElementById('enhanceStatus').textContent = data.message;
+                    document.getElementById('enhanceStatus').className = 'alert alert-success';
+                } else {
+                    document.getElementById('enhanceStatus').textContent = 'Fehler: ' + (data.error || 'Unbekannter Fehler');
+                    document.getElementById('enhanceStatus').className = 'alert alert-danger';
+                }
+            })
+            .catch(error => {
+                console.error('Fehler:', error);
+                document.getElementById('enhanceStatus').textContent = 'Fehler bei der Anfrage';
+                document.getElementById('enhanceStatus').className = 'alert alert-danger';
+            })
+            .finally(() => {
+                // Verstecke Fortschrittsanzeige
+                document.getElementById('enhanceProgress').style.display = 'none';
+                // Aktiviere Button wieder
+                this.disabled = false;
+            });
+        });
+    });
+</script>
+{% endblock %}

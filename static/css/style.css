@@ -1,0 +1,40 @@
+/* Custom styles */
+.search-result-item {
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.search-result-item:hover {
+    background-color: #f8f9fa;
+}
+
+.search-result-item .badge {
+    margin-left: 8px;
+}
+
+#search-input {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+}
+
+#search-type {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+}
+
+.progress {
+    height: 25px;
+}
+
+.progress-bar {
+    transition: width 0.3s ease;
+}
+
+#cancel-download-btn {
+    display: none;
+}
+
+/* Show cancel button when download is active */
+.downloading #cancel-download-btn {
+    display: inline-block;
+}
