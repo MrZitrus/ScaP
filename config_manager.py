@@ -68,7 +68,7 @@ class ConfigManager:
             },
             "language": {
                 "prefer": ["de", "deu", "ger"],
-                "require_dub": True,
+                "require_dub": False,
                 "sample_seconds": 45,
                 "remux_to_de_if_present": True,
                 "accept_on_error": False,

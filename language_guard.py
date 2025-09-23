@@ -15,7 +15,7 @@ WHISPER_ACCEPT_639_1 = set(map(str.lower, config.get('language.whisper_accept_63
 SAMPLE_SECONDS = config.get('language.sample_seconds', 45)
 REMUX_TO_DE_IF_PRESENT = config.get('language.remux_to_de_if_present', True)
 VERIFY_WITH_WHISPER = config.get('language.verify_with_whisper', True)
-REQUIRE_DUB = config.get('language.require_dub', True)  # wenn True: Subs reichen NICHT
+REQUIRE_DUB = config.get('language.require_dub', False)  # wenn True: Subs reichen NICHT
 
 LANG_ISO_EQUIV = {
     "de": {"de", "deu", "ger"},
@@ -153,14 +153,26 @@ def content_language_guess(video_path: str, meta=None, sample_seconds=None) -> s
                 continue
     return ""
 
-def remux_to_de(video_in: str, meta=None, desired=DESIRED_LANG_TAGS) -> str | None:
+def remux_to_de(video_in: str, meta=None, desired=DESIRED_LANG_TAGS, preferred_suffix: str | None = None) -> str | None:
     if meta is None:
         meta = ffprobe_streams(video_in)
     idxs = audio_lang_indices(meta, desired)
     if not idxs:
         return None
 
-    out_path = Path(video_in).with_suffix('.de.mkv')
+    suffix_token = None
+    if preferred_suffix:
+        suffix_token = preferred_suffix.lower()
+    else:
+        if desired:
+            ordered = list(desired)
+            suffix_token = next((tag for tag in ordered if len(tag) == 2 and tag.isalpha()), None)
+            if not suffix_token:
+                suffix_token = ordered[0]
+    if not suffix_token:
+        suffix_token = 'lang'
+
+    out_path = Path(video_in).with_suffix(f'.{suffix_token}.mkv')
     temp_out = out_path.with_suffix(out_path.suffix + '.tmp')
 
     # Nutze absoluten Pfad falls verfügbar
@@ -196,11 +208,23 @@ def verify_language(
     reject_subs_only: bool = True
 ) -> tuple[bool, str, str | None]:
     """Check file language. Returns (ok, detail, fixed_path_or_none)."""
-    desired_tags = {tag.lower() for tag in prefer_tags} if prefer_tags is not None else DESIRED_LANG_TAGS
+    if prefer_tags is None:
+        prefer_sequence = list(DESIRED_LANG_TAGS)
+    elif isinstance(prefer_tags, (list, tuple)):
+        prefer_sequence = [str(tag).lower() for tag in prefer_tags]
+    else:
+        prefer_sequence = [str(tag).lower() for tag in prefer_tags]
+
+    desired_tags = set(prefer_sequence) if prefer_sequence else DESIRED_LANG_TAGS
     require_dub_setting = require_dub if require_dub is not None else REQUIRE_DUB
     sample_sec = sample_seconds if sample_seconds is not None else SAMPLE_SECONDS
     remux_setting = remux if remux is not None else REMUX_TO_DE_IF_PRESENT
-    allowed_whisper = {tag.lower() for tag in (accept_langs_639_1 if accept_langs_639_1 is not None else WHISPER_ACCEPT_639_1)}
+    if accept_langs_639_1 is None:
+        whisper_sequence = list(WHISPER_ACCEPT_639_1)
+    else:
+        whisper_sequence = [str(tag).lower() for tag in accept_langs_639_1]
+    allowed_whisper = set(whisper_sequence)
+    preferred_suffix = next(iter(whisper_sequence), None)
 
     try:
         meta = ffprobe_streams(video_path)
@@ -210,13 +234,16 @@ def verify_language(
     audio_idxs = audio_lang_indices(meta, desired_tags)
     if audio_idxs:
         if remux_setting:
-            out = remux_to_de(video_path, meta, desired_tags)
+            out = remux_to_de(video_path, meta, desired_tags, preferred_suffix)
             if out:
                 return True, "tag-match-remuxed", out
         return True, "tag-match", None
 
-    if reject_subs_only and not audio_idxs and has_subtitles_in_lang(meta, desired_tags):
+    if reject_subs_only and has_subtitles_in_lang(meta, desired_tags):
         return False, "subs-only", None
+
+    if require_dub_setting:
+        return False, "dub-required", None
 
     mismatch_detail = "unknown"
     if VERIFY_WITH_WHISPER:
@@ -229,7 +256,7 @@ def verify_language(
         mismatch_detail = "whisper-disabled"
 
     if VERIFY_WITH_WHISPER and remux_setting:
-        out = remux_to_de(video_path, meta, desired_tags)
+        out = remux_to_de(video_path, meta, desired_tags, preferred_suffix)
         if out:
             lang2 = content_language_guess(out, sample_seconds=sample_sec)
             lang2_lower = lang2.lower() if lang2 else ""
@@ -274,9 +301,15 @@ def audit_and_retry(download_func, candidate_urls: list[str]) -> tuple[str | Non
 def audit_and_retry_with_priority(
     download_func,
     candidate_urls: list[str],
-    audio_priority: list[str] | None = None
+    audio_priority: list[str] = ["de", "en", "ja"]
 ) -> tuple[str | None, str]:
-    """Try candidate URLs against a language priority order."""
+    """
+    Testet URLs gegen eine Sprach-Priorität. Für jede Zielsprache:
+    - prüft ffprobe-Tags (de/en/ja Aliase)
+    - lehnt 'nur Subs' ab
+    - nutzt Whisper zur Verifikation
+    - remuxt ggf. auf gewünschte Spur
+    """
     priority = list(audio_priority) if audio_priority else list(LANGUAGE_FALLBACK_PRIORITY)
 
     for target in priority:
@@ -298,10 +331,10 @@ def audit_and_retry_with_priority(
                 )
                 final_path = fixed or path
                 if ok:
-                    logging.info("ACCEPT [%s]: %s (file=%s)", target, detail, final_path)
+                    logging.info("✓ [%s] akzeptiert: %s (file=%s)", target, detail, final_path)
                     return final_path, f"{target}:{detail}"
 
-                logging.warning("REJECT [%s]: %s (url=%s, file=%s)", target, detail, url, path)
+                logging.warning("✗ [%s] abgelehnt: %s (url=%s, file=%s)", target, detail, url, path)
                 try:
                     Path(path).unlink(missing_ok=True)
                     if fixed and fixed != path:
