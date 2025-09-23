@@ -6,7 +6,7 @@ Combines settings from .env, config.json, and environment variables.
 import os
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from dotenv import load_dotenv
 
 # Configure logging
@@ -73,6 +73,17 @@ class ConfigManager:
                 "remux_to_de_if_present": True,
                 "accept_on_error": False,
                 "verify_with_whisper": True
+            },
+            "language_priority": {
+                "enabled": True,
+                "priorities": [
+                    ["de", None],     # Deutsch
+                    ["en", "de"],     # Englisch mit German Dub
+                    ["en", None],     # Englisch
+                    ["ja", "de"],     # Japanisch mit German Dub
+                    ["ja", "en"],     # Japanisch mit English Dub
+                    ["ja", None]      # Japanisch (Original)
+                ]
             }
         }
 
@@ -128,6 +139,10 @@ class ConfigManager:
 
         if os.getenv('DB_PATH'):
             self.config['download']['db_path'] = os.getenv('DB_PATH')
+
+        # Language priority settings
+        if os.getenv('LANGUAGE_PRIORITY_ENABLED'):
+            self.config['language_priority']['enabled'] = os.getenv('LANGUAGE_PRIORITY_ENABLED').lower() in ('true', '1', 't')
 
         # Server settings
         if os.getenv('FLASK_PORT'):
@@ -237,6 +252,31 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"Error saving configuration: {str(e)}")
             return False
+
+    def get_language_priority(self) -> List[Tuple[Optional[str], Optional[str]]]:
+        """
+        Get the language priority configuration.
+
+        Returns:
+            List[Tuple[Optional[str], Optional[str]]]: List of (audio_lang, dub_lang) tuples
+        """
+        if not self.config.get('language_priority', {}).get('enabled', True):
+            return []
+
+        priorities = self.config.get('language_priority', {}).get('priorities', [])
+        if not priorities:
+            # Fallback to default priorities
+            return [
+                ("de", None),     # Deutsch
+                ("en", "de"),     # Englisch mit German Dub
+                ("en", None),     # Englisch
+                ("ja", "de"),     # Japanisch mit German Dub
+                ("ja", "en"),     # Japanisch mit English Dub
+                ("ja", None)      # Japanisch (Original)
+            ]
+
+        # Convert list of lists to list of tuples
+        return [(audio, dub) for audio, dub in priorities]
 
 
 # Singleton instance

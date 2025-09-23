@@ -10,6 +10,8 @@ import threading
 from config_manager import get_config
 from database import get_media_db
 from gemini_client import GeminiClient
+from models import EpisodeVariant
+from language_guard import pick_best, sort_by_preference, pick_best_with_quality
 
 # Get configuration
 config = get_config()
@@ -753,6 +755,172 @@ def download_voe():
     except Exception as e:
         logger.error(f"Fehler beim Verarbeiten der VOE.sx Download-Anfrage: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/episode/variants', methods=['POST'])
+def get_episode_variants():
+    """
+    Zentraler Endpoint für Episode-Varianten-Auswahl.
+    Sammelt Varianten von allen verfügbaren Quellen und wählt die beste aus.
+    """
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'Keine Daten angegeben'}), 400
+
+        episode_url = data.get('url')
+        season = data.get('season')
+        episode = data.get('episode')
+
+        if not episode_url:
+            return jsonify({'error': 'Episode-URL ist erforderlich'}), 400
+
+        logger.info(f"🔍 Sammle Varianten für Episode: {episode_url}")
+
+        # Sammle Varianten von allen verfügbaren Scrapern
+        all_variants = []
+
+        # Verwende den integrierten Scraper um Varianten zu sammeln
+        try:
+            # Temporäres StreamScraper-Objekt für Varianten-Sammlung
+            temp_scraper = StreamScraper(
+                download_dir=config.get('download.directory', 'downloads'),
+                max_parallel_downloads=1,
+                max_parallel_extractions=3
+            )
+
+            # Extrahiere Varianten für diese Episode
+            variants = temp_scraper.extract_stream_urls(
+                episode_url,
+                temp_scraper.get_base_url(episode_url),
+                season,
+                episode
+            )
+
+            if variants:
+                all_variants.extend(variants)
+                logger.info(f"📺 Gefunden: {len(variants)} Varianten vom Haupt-Scraper")
+
+        except Exception as e:
+            logger.warning(f"Haupt-Scraper fehlgeschlagen: {str(e)}")
+
+        # Fallback: Direkte VOE-Links versuchen falls verfügbar
+        if not all_variants:
+            logger.info("🔄 Versuche direkte VOE-Links...")
+            # Hier könnten weitere Scraper-Integrationen hinzugefügt werden
+
+        if not all_variants:
+            return jsonify({
+                'ok': False,
+                'error': 'Keine Varianten gefunden'
+            }), 404
+
+        # Wähle die beste Variante
+        best_variant = pick_best(all_variants)
+        if not best_variant:
+            # Fallback: sortierte Liste zurückgeben
+            sorted_variants = sort_by_preference(all_variants)
+            return jsonify({
+                'ok': True,
+                'best': None,
+                'variants': [variant.__dict__ for variant in sorted_variants],
+                'note': 'Keine exakte Präferenz gefunden – Varianten sortiert.',
+                'total_variants': len(sorted_variants)
+            }), 200
+
+        # Gib beste Variante + sortierte Liste zurück
+        sorted_variants = sort_by_preference(all_variants)
+        return jsonify({
+            'ok': True,
+            'best': best_variant.__dict__,
+            'variants': [variant.__dict__ for variant in sorted_variants],
+            'total_variants': len(sorted_variants)
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Fehler beim Sammeln der Varianten: {str(e)}", exc_info=True)
+        return jsonify({
+            'ok': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/episode/variants/<path:series_url>', methods=['GET'])
+def get_episode_variants_by_series(series_url):
+    """
+    Sammelt Varianten für eine Serie basierend auf der Series-URL.
+    Dies ist ein Beispiel-Endpoint - in der Praxis würde man Series-IDs verwenden.
+    """
+    try:
+        # Parameter aus Query-String
+        season = request.args.get('season', type=int)
+        episode = request.args.get('episode', type=int)
+
+        if not season or not episode:
+            return jsonify({
+                'error': 'Season und Episode Parameter sind erforderlich'
+            }), 400
+
+        logger.info(f"🔍 Sammle Varianten für {series_url} S{season}E{episode}")
+
+        # Hier würde die echte Implementierung die Series-URL in eine Episode-URL umwandeln
+        # Für dieses Beispiel verwenden wir die Series-URL direkt als Episode-URL
+        episode_url = series_url
+
+        # Sammle Varianten (gleiche Logik wie oben)
+        all_variants = []
+
+        try:
+            temp_scraper = StreamScraper(
+                download_dir=config.get('download.directory', 'downloads'),
+                max_parallel_downloads=1,
+                max_parallel_extractions=3
+            )
+
+            variants = temp_scraper.extract_stream_urls(
+                episode_url,
+                temp_scraper.get_base_url(episode_url),
+                season,
+                episode
+            )
+
+            if variants:
+                all_variants.extend(variants)
+                logger.info(f"📺 Gefunden: {len(variants)} Varianten")
+
+        except Exception as e:
+            logger.warning(f"Scraper fehlgeschlagen: {str(e)}")
+
+        if not all_variants:
+            return jsonify({
+                'ok': False,
+                'error': 'Keine Varianten gefunden'
+            }), 404
+
+        # Wähle die beste Variante
+        best_variant = pick_best(all_variants)
+        if not best_variant:
+            sorted_variants = sort_by_preference(all_variants)
+            return jsonify({
+                'ok': True,
+                'best': None,
+                'variants': [variant.__dict__ for variant in sorted_variants],
+                'note': 'Keine exakte Präferenz gefunden – Varianten sortiert.',
+                'total_variants': len(sorted_variants)
+            }), 200
+
+        sorted_variants = sort_by_preference(all_variants)
+        return jsonify({
+            'ok': True,
+            'best': best_variant.__dict__,
+            'variants': [variant.__dict__ for variant in sorted_variants],
+            'total_variants': len(sorted_variants)
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Fehler beim Sammeln der Varianten: {str(e)}", exc_info=True)
+        return jsonify({
+            'ok': False,
+            'error': str(e)
+        }), 500
 
 # WebSocket Routes
 @socketio.on('connect')

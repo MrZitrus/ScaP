@@ -20,6 +20,8 @@ from typing import List, Tuple, Optional, Dict, Any
 from yt_dlp import YoutubeDL
 from scrapers.voe_fallback import VoeFallbackDownloader
 from database import get_media_db, MediaDatabase
+from models import EpisodeVariant
+from language_guard import normalize_variants
 
 def _resolve_ff_binary(name: str) -> str | None:
     # 1) env override
@@ -411,8 +413,8 @@ class StreamScraper:
             logging.error(f"Fehler beim Suchen der Stream-Links: {str(e)}")
             return []
 
-    def extract_stream_urls(self, episode_url: str, base_url: str) -> List[str]:
-        """Extrahiert die Stream-URLs von der Seite."""
+    def extract_stream_urls(self, episode_url: str, base_url: str, season: int = None, episode: int = None) -> List[EpisodeVariant]:
+        """Extrahiert die Stream-URLs von der Seite und gibt EpisodeVariant-Objekte zurück."""
         try:
             logging.info(f"\nExtrahiere Stream-URLs von: {episode_url}")
 
@@ -450,7 +452,38 @@ class StreamScraper:
                         stream_urls.append(final_url)
 
             logging.info(f"Gefunden: {len(stream_urls)} verfügbare Streams")
-            return stream_urls
+
+            # Konvertiere URLs zu EpisodeVariant-Objekten
+            variants = []
+            for i, url in enumerate(stream_urls):
+                # Versuche Qualität aus URL oder Kontext zu extrahieren
+                quality = self._extract_quality_from_url(url)
+
+                # Versuche Titel aus der Seite zu extrahieren
+                title = self._extract_episode_title_from_url(episode_url)
+
+                variant = EpisodeVariant(
+                    url=url,
+                    source=self._extract_source_from_url(url),
+                    season=season,
+                    episode=episode,
+                    title=title,
+                    quality=quality,
+                    audio_lang=None,  # wird von language_guard normalisiert
+                    dub_lang=None,    # wird von language_guard normalisiert
+                    subs=[],          # kann später gefüllt werden
+                    extra={
+                        "label": f"Stream {i+1}",
+                        "mirror_index": i+1,
+                        "total_mirrors": len(stream_urls)
+                    }
+                )
+                variants.append(variant)
+
+            # Normalisiere die Varianten mit language_guard
+            normalized_variants = normalize_variants(variants)
+            logging.info(f"Erstellt und normalisiert: {len(normalized_variants)} EpisodeVariant-Objekte")
+            return normalized_variants
 
         except Exception as e:
             logging.error(f"Fehler beim Extrahieren der Stream-URLs: {str(e)}")
@@ -1328,20 +1361,20 @@ class StreamScraper:
             for episode_num, episode_url, episode_title, output_path in new_episodes:
                 logging.info(f"Bereite vor: {os.path.basename(output_path)}")
 
-                # Hole Video-URLs
-                stream_urls = self.extract_stream_urls(episode_url, self.get_base_url(url))
-                if not stream_urls:
+                # Hole Video-URLs als EpisodeVariant-Objekte
+                variants = self.extract_stream_urls(episode_url, self.get_base_url(url), season_num, episode_num)
+                if not variants:
                     logging.warning(f"Keine Video-URLs gefunden für Episode {episode_num}")
                     failed_downloads.append(f"S{season_num:02d}E{episode_num:02d} - {episode_title}")
                     continue
 
                 # Versuche alle Mirrors nacheinander bis Language Guard OK sagt
                 success = False
-                for mirror_idx, stream_url in enumerate(stream_urls):
-                    logging.debug(f"Versuche Mirror {mirror_idx + 1}/{len(stream_urls)} für {episode_title}")
+                for mirror_idx, variant in enumerate(variants):
+                    logging.debug(f"Versuche Mirror {mirror_idx + 1}/{len(variants)} für {episode_title}")
                     task = DownloadTask(
                         title=episode_title,
-                        url=stream_url,
+                        url=variant.url,  # Verwende variant.url statt stream_url
                         output_path=output_path,
                         episode_num=episode_num
                     )
@@ -1372,6 +1405,89 @@ class StreamScraper:
         """Extrahiert die Basis-URL aus der gegebenen URL."""
         parsed = urlparse(url)
         return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _extract_quality_from_url(self, url: str) -> Optional[str]:
+        """Extrahiert Qualitätsinformationen aus einer Stream-URL."""
+        # Häufige Qualitätsmuster in URLs
+        quality_patterns = [
+            (r'(\d{3,4})p', r'\1p'),  # 720p, 1080p, etc.
+            (r'HD', 'HD'),
+            (r'SD', 'SD'),
+            (r'4K', '4K'),
+            (r'2160p', '2160p'),
+            (r'1440p', '1440p'),
+            (r'1080p', '1080p'),
+            (r'720p', '720p'),
+            (r'480p', '480p'),
+            (r'360p', '360p'),
+        ]
+
+        url_lower = url.lower()
+        for pattern, replacement in quality_patterns:
+            match = re.search(pattern, url_lower)
+            if match:
+                return match.group(1) if r'\1' in replacement else replacement
+
+        return None
+
+    def _extract_episode_title_from_url(self, episode_url: str) -> Optional[str]:
+        """Extrahiert den Episodentitel aus der Episode-URL."""
+        try:
+            # Versuche den Titel aus der Episode-Seite zu extrahieren
+            response = self.make_request(episode_url)
+            if response:
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+                # Versuche verschiedene Selektoren für den Titel
+                title_selectors = [
+                    'h1[itemprop="name"]',
+                    'h1',
+                    '.episode-title',
+                    '.title',
+                    'meta[property="og:title"]'
+                ]
+
+                for selector in title_selectors:
+                    if selector.startswith('meta'):
+                        meta = soup.select_one(selector)
+                        if meta and meta.get('content'):
+                            return meta['content'].strip()
+                    else:
+                        title_elem = soup.select_one(selector)
+                        if title_elem:
+                            return title_elem.get_text().strip()
+
+            # Fallback: Extrahiere aus URL
+            if '/episode-' in episode_url:
+                match = re.search(r'/episode-(\d+)', episode_url)
+                if match:
+                    return f"Episode {match.group(1)}"
+
+        except Exception as e:
+            logging.debug(f"Fehler beim Extrahieren des Titels: {str(e)}")
+
+        return None
+
+    def _extract_source_from_url(self, url: str) -> str:
+        """Extrahiert die Quelle aus einer Stream-URL."""
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+
+        # Bekannte Streaming-Hosts
+        if 'voe.sx' in domain:
+            return 'voe'
+        elif 'maxfinishseveral.com' in domain:
+            return 'maxfinishseveral'
+        elif 'kristiesoundsimply.com' in domain:
+            return 'kristiesoundsimply'
+        elif 'streamtape' in domain:
+            return 'streamtape'
+        elif 'dood' in domain:
+            return 'dood'
+        elif 'vidoza' in domain:
+            return 'vidoza'
+        else:
+            return 'unknown'
 
     def _rotate_user_agent(self):
         """Rotate user agent to avoid detection."""
