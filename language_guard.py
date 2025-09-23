@@ -432,6 +432,9 @@ LANG_MAP = {
     "zh": [r"\bzh\b", r"chinese", r"chinesisch", r"chi\b", r"中文", r"🇨🇳", r"flag.*zh"],
 }
 
+# Entferne leere Regex-Einträge, damit keine Sprache versehentlich alles matched.
+LANG_MAP = {lang: [pattern for pattern in patterns if pattern] for lang, patterns in LANG_MAP.items()}
+
 DUB_PATTERNS = {
     "de": [
         r"german\s*dub", r"ger\s*dub", r"de\s*dub", r"deutsch(?:e|er)?\s*dub",
