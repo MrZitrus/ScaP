@@ -15,7 +15,7 @@ WHISPER_ACCEPT_639_1 = set(map(str.lower, config.get('language.whisper_accept_63
 SAMPLE_SECONDS = config.get('language.sample_seconds', 45)
 REMUX_TO_DE_IF_PRESENT = config.get('language.remux_to_de_if_present', True)
 VERIFY_WITH_WHISPER = config.get('language.verify_with_whisper', True)
-REQUIRE_DUB = config.get('language.require_dub', True)  # wenn True: Subs reichen NICHT
+REQUIRE_DUB = config.get('language.require_dub', False)  # wenn True: Subs reichen NICHT
 
 LANG_ISO_EQUIV = {
     "de": {"de", "deu", "ger"},
@@ -35,25 +35,28 @@ DEFAULT_LANG_PRIORITY = [
 ]
 
 def _get_lang_priority() -> list[tuple[str | None, str | None]]:
+    """Holt die Sprach-Priorität robust aus:
+      - ConfigManager.get_language_priority() (bevorzugt)
+      - oder direkt aus 'language_priority.priorities'
+      - sonst DEFAULT_LANG_PRIORITY
     """
-    Holt die Sprach-Priorität robust:
-    - Wenn config ein Objekt mit get_language_priority() ist -> verwende das.
-    - Sonst als Dict: 'language.priority' oder Default.
-    """
-    # Objekt-Methode?
     try:
         if hasattr(config, "get_language_priority"):
-            prio = config.get_language_priority()
-            if prio:
-                return prio
+            pr = config.get_language_priority()
+            if pr:
+                return pr
     except Exception:
         pass
 
-    # Dict-Config (mit Punkt-Keys)
     try:
-        prio = config.get("language.priority")
-        if prio:
-            return prio
+        pr = config.get("language_priority.priorities")
+        if pr:
+            out: list[tuple[str | None, str | None]] = []
+            for a, d in pr:
+                audio = str(a).lower() if a is not None else None
+                dub = str(d).lower() if d is not None else None
+                out.append((audio, dub))
+            return out
     except Exception:
         pass
 
@@ -153,14 +156,26 @@ def content_language_guess(video_path: str, meta=None, sample_seconds=None) -> s
                 continue
     return ""
 
-def remux_to_de(video_in: str, meta=None, desired=DESIRED_LANG_TAGS) -> str | None:
+def remux_to_de(video_in: str, meta=None, desired=DESIRED_LANG_TAGS, preferred_suffix: str | None = None) -> str | None:
     if meta is None:
         meta = ffprobe_streams(video_in)
     idxs = audio_lang_indices(meta, desired)
     if not idxs:
         return None
 
-    out_path = Path(video_in).with_suffix('.de.mkv')
+    suffix_token = None
+    if preferred_suffix:
+        suffix_token = preferred_suffix.lower()
+    else:
+        if desired:
+            ordered = list(desired)
+            suffix_token = next((tag for tag in ordered if len(tag) == 2 and tag.isalpha()), None)
+            if not suffix_token:
+                suffix_token = ordered[0]
+    if not suffix_token:
+        suffix_token = 'lang'
+
+    out_path = Path(video_in).with_suffix(f'.{suffix_token}.mkv')
     temp_out = out_path.with_suffix(out_path.suffix + '.tmp')
 
     # Nutze absoluten Pfad falls verfügbar
@@ -196,11 +211,23 @@ def verify_language(
     reject_subs_only: bool = True
 ) -> tuple[bool, str, str | None]:
     """Check file language. Returns (ok, detail, fixed_path_or_none)."""
-    desired_tags = {tag.lower() for tag in prefer_tags} if prefer_tags is not None else DESIRED_LANG_TAGS
+    if prefer_tags is None:
+        prefer_sequence = list(DESIRED_LANG_TAGS)
+    elif isinstance(prefer_tags, (list, tuple)):
+        prefer_sequence = [str(tag).lower() for tag in prefer_tags]
+    else:
+        prefer_sequence = [str(tag).lower() for tag in prefer_tags]
+
+    desired_tags = set(prefer_sequence) if prefer_sequence else DESIRED_LANG_TAGS
     require_dub_setting = require_dub if require_dub is not None else REQUIRE_DUB
     sample_sec = sample_seconds if sample_seconds is not None else SAMPLE_SECONDS
     remux_setting = remux if remux is not None else REMUX_TO_DE_IF_PRESENT
-    allowed_whisper = {tag.lower() for tag in (accept_langs_639_1 if accept_langs_639_1 is not None else WHISPER_ACCEPT_639_1)}
+    if accept_langs_639_1 is None:
+        whisper_sequence = list(WHISPER_ACCEPT_639_1)
+    else:
+        whisper_sequence = [str(tag).lower() for tag in accept_langs_639_1]
+    allowed_whisper = set(whisper_sequence)
+    preferred_suffix = next(iter(whisper_sequence), None)
 
     try:
         meta = ffprobe_streams(video_path)
@@ -210,13 +237,16 @@ def verify_language(
     audio_idxs = audio_lang_indices(meta, desired_tags)
     if audio_idxs:
         if remux_setting:
-            out = remux_to_de(video_path, meta, desired_tags)
+            out = remux_to_de(video_path, meta, desired_tags, preferred_suffix)
             if out:
                 return True, "tag-match-remuxed", out
         return True, "tag-match", None
 
-    if reject_subs_only and not audio_idxs and has_subtitles_in_lang(meta, desired_tags):
+    if reject_subs_only and has_subtitles_in_lang(meta, desired_tags):
         return False, "subs-only", None
+
+    if require_dub_setting:
+        return False, "dub-required", None
 
     mismatch_detail = "unknown"
     if VERIFY_WITH_WHISPER:
@@ -229,7 +259,7 @@ def verify_language(
         mismatch_detail = "whisper-disabled"
 
     if VERIFY_WITH_WHISPER and remux_setting:
-        out = remux_to_de(video_path, meta, desired_tags)
+        out = remux_to_de(video_path, meta, desired_tags, preferred_suffix)
         if out:
             lang2 = content_language_guess(out, sample_seconds=sample_sec)
             lang2_lower = lang2.lower() if lang2 else ""
@@ -266,7 +296,7 @@ def audit_and_retry(download_func, candidate_urls: list[str]) -> tuple[str | Non
             print(f"Download failed for {url}: {e}")
             continue
     
-    return None, "no-valid-de-source"
+    return None, "no-valid-source-any-lang"
 
 
 
@@ -274,13 +304,63 @@ def audit_and_retry(download_func, candidate_urls: list[str]) -> tuple[str | Non
 def audit_and_retry_with_priority(
     download_func,
     candidate_urls: list[str],
-    audio_priority: list[str] | None = None
+    audio_priority: list[str] | None = None,
+    pair_priority: list[tuple[str | None, str | None]] | None = None,
 ) -> tuple[str | None, str]:
-    """Try candidate URLs against a language priority order."""
+    """
+    Testet URLs gegen eine Sprach-Priorität. Für jede Zielsprache:
+    - prüft ffprobe-Tags (de/en/ja Aliase)
+    - lehnt 'nur Subs' ab
+    - nutzt Whisper zur Verifikation
+    - remuxt ggf. auf gewünschte Spur
+    """
+    if pair_priority is None:
+        try:
+            pair_priority = _get_lang_priority()
+        except Exception:
+            pair_priority = None
+
+    if pair_priority:
+        for a_pref, d_pref in pair_priority:
+            tagset = {t.lower() for t in LANG_ISO_EQUIV.get(a_pref, {a_pref})} if a_pref else set()
+            whisper_accept = {a_pref} if a_pref else set()
+            need_dub = d_pref is not None
+
+            for url in candidate_urls:
+                try:
+                    path = download_func(url)
+                    if not path or not os.path.exists(path):
+                        continue
+
+                    ok, detail, fixed = verify_language(
+                        path,
+                        prefer_tags=tagset if tagset else None,
+                        require_dub=need_dub,
+                        accept_langs_639_1=whisper_accept if whisper_accept else None,
+                        reject_subs_only=True,
+                    )
+                    final_path = fixed or path
+                    if ok:
+                        logging.info("✓ [%s|%s] akzeptiert: %s (file=%s)", a_pref, d_pref, detail, final_path)
+                        return final_path, f"{a_pref}|{d_pref}:{detail}"
+
+                    logging.warning("✗ [%s|%s] abgelehnt: %s (url=%s, file=%s)", a_pref, d_pref, detail, url, path)
+                    try:
+                        Path(path).unlink(missing_ok=True)
+                        if fixed and fixed != path:
+                            Path(fixed).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    logging.warning("[%s|%s] Download failed for %s: %s", a_pref, d_pref, url, exc)
+                    continue
+
+        return None, "no-valid-source-any-lang"
+
     priority = list(audio_priority) if audio_priority else list(LANGUAGE_FALLBACK_PRIORITY)
 
     for target in priority:
-        tagset = {tag.lower() for tag in LANG_ISO_EQUIV.get(target, {target})}
+        tagset = {t.lower() for t in LANG_ISO_EQUIV.get(target, {target})}
         whisper_accept = {target.lower()}
 
         for url in candidate_urls:
@@ -298,10 +378,10 @@ def audit_and_retry_with_priority(
                 )
                 final_path = fixed or path
                 if ok:
-                    logging.info("ACCEPT [%s]: %s (file=%s)", target, detail, final_path)
+                    logging.info("✓ [%s] akzeptiert: %s (file=%s)", target, detail, final_path)
                     return final_path, f"{target}:{detail}"
 
-                logging.warning("REJECT [%s]: %s (url=%s, file=%s)", target, detail, url, path)
+                logging.warning("✗ [%s] abgelehnt: %s (url=%s, file=%s)", target, detail, url, path)
                 try:
                     Path(path).unlink(missing_ok=True)
                     if fixed and fixed != path:
@@ -352,30 +432,33 @@ LANG_MAP = {
     "zh": [r"\bzh\b", r"chinese", r"chinesisch", r"chi\b", r"中文", r"🇨🇳", r"flag.*zh"],
 }
 
+# Entferne leere Regex-Einträge, damit keine Sprache versehentlich alles matched.
+LANG_MAP = {lang: [pattern for pattern in patterns if pattern] for lang, patterns in LANG_MAP.items()}
+
 DUB_PATTERNS = {
     "de": [
         r"german\s*dub", r"ger\s*dub", r"de\s*dub", r"deutsch(?:e|er)?\s*dub",
-        r"gerdub", r"ger-dub", r"de-dub", r"deutsch.*dub", r"german.*dub",
-        r"dubbed.*german", r"dubbed.*deutsch", r"dub.*ger", r"dub.*de",
+        r"gerdub", r"ger-dub", r"de-dub",
+        r"(?:deutsch|german).*dub", r"dub(?:bed)?\s*(?:deutsch|german|ger|de)\b",
         r"🇩🇪.*dub", r"flag.*de.*dub"
     ],
     "en": [
-        r"english\s*dub", r"eng\s*dub", r"en\s*dub", r"english.*dub", r"eng.*dub",
-        r"dubbed.*english", r"dubbed.*eng", r"dub.*en", r"dub.*english",
+        r"english\s*dub", r"eng\s*dub", r"en\s*dub",
+        r"(?:english|eng|en).*dub", r"dub(?:bed)?\s*(?:english|eng|en)\b",
         r"🇺🇸.*dub", r"flag.*en.*dub"
     ],
     "ja": [
-        r"japanese\s*dub", r"jap\s*dub", r"ja\s*dub", r"japanese.*dub", r"jap.*dub",
-        r"dubbed.*japanese", r"dubbed.*jap", r"dub.*ja", r"dub.*japanese",
+        r"japanese\s*dub", r"jap\s*dub", r"ja\s*dub",
+        r"(?:japanese|jap|ja).*dub", r"dub(?:bed)?\s*(?:japanese|jap|ja)\b",
         r"🇯🇵.*dub", r"flag.*jp.*dub"
     ],
-    "fr": [r"french\s*dub", r"fra\s*dub", r"fr\s*dub", r"french.*dub", r"dub.*french"],
-    "es": [r"spanish\s*dub", r"spa\s*dub", r"es\s*dub", r"spanish.*dub", r"dub.*spanish"],
-    "it": [r"italian\s*dub", r"ita\s*dub", r"it\s*dub", r"italian.*dub", r"dub.*italian"],
-    "pt": [r"portuguese\s*dub", r"por\s*dub", r"pt\s*dub", r"portuguese.*dub", r"dub.*portuguese"],
-    "ru": [r"russian\s*dub", r"rus\s*dub", r"ru\s*dub", r"russian.*dub", r"dub.*russian"],
-    "ko": [r"korean\s*dub", r"kor\s*dub", r"ko\s*dub", r"korean.*dub", r"dub.*korean"],
-    "zh": [r"chinese\s*dub", r"chi\s*dub", r"zh\s*dub", r"chinese.*dub", r"dub.*chinese"],
+    "fr": [r"french\s*dub", r"fra\s*dub", r"fr\s*dub", r"(?:french|fra|fr).*dub"],
+    "es": [r"spanish\s*dub", r"spa\s*dub", r"es\s*dub", r"(?:spanish|spa|es).*dub"],
+    "it": [r"italian\s*dub", r"ita\s*dub", r"it\s*dub", r"(?:italian|ita|it).*dub"],
+    "pt": [r"portuguese\s*dub", r"por\s*dub", r"pt\s*dub", r"(?:portuguese|por|pt).*dub"],
+    "ru": [r"russian\s*dub", r"rus\s*dub", r"ru\s*dub", r"(?:russian|rus|ru).*dub"],
+    "ko": [r"korean\s*dub", r"kor\s*dub", r"ko\s*dub", r"(?:korean|kor|ko).*dub"],
+    "zh": [r"chinese\s*dub", r"chi\s*dub", r"zh\s*dub", r"(?:chinese|chi|zh).*dub"],
 }
 
 # Additional patterns for special cases

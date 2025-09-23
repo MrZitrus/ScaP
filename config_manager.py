@@ -6,7 +6,7 @@ Combines settings from .env, config.json, and environment variables.
 import os
 import json
 import logging
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 # Configure logging
@@ -68,7 +68,7 @@ class ConfigManager:
             },
             "language": {
                 "prefer": ["de", "deu", "ger"],
-                "require_dub": True,
+                "require_dub": False,
                 "sample_seconds": 45,
                 "remux_to_de_if_present": True,
                 "accept_on_error": False,
@@ -260,29 +260,30 @@ class ConfigManager:
             return False
 
     def get_language_priority(self) -> List[Tuple[Optional[str], Optional[str]]]:
-        """
-        Get the language priority configuration.
+        """Liefert die Sprach-Prioritäten als Liste von 2-Tupeln (audio_lang, dub_lang),
+        oder den Default, wenn nichts konfiguriert ist."""
+        try:
+            enabled = self.get("language_priority.enabled", True)
+            pr = self.get("language_priority.priorities", None)
+            if enabled and pr and all(isinstance(x, (list, tuple)) and len(x) == 2 for x in pr):
+                out: List[Tuple[Optional[str], Optional[str]]] = []
+                for a, d in pr:
+                    audio = str(a).lower() if a is not None else None
+                    dub = str(d).lower() if d is not None else None
+                    out.append((audio, dub))
+                return out
+        except Exception:
+            pass
 
-        Returns:
-            List[Tuple[Optional[str], Optional[str]]]: List of (audio_lang, dub_lang) tuples
-        """
-        if not self.config.get('language_priority', {}).get('enabled', True):
-            return []
-
-        priorities = self.config.get('language_priority', {}).get('priorities', [])
-        if not priorities:
-            # Fallback to default priorities
-            return [
-                ("de", None),     # Deutsch
-                ("en", "de"),     # Englisch mit German Dub
-                ("en", None),     # Englisch
-                ("ja", "de"),     # Japanisch mit German Dub
-                ("ja", "en"),     # Japanisch mit English Dub
-                ("ja", None)      # Japanisch (Original)
-            ]
-
-        # Convert list of lists to list of tuples
-        return [(audio, dub) for audio, dub in priorities]
+        # Fallback entspricht deinem Default
+        return [
+            ("de", None),
+            ("en", "de"),
+            ("en", None),
+            ("ja", "de"),
+            ("ja", "en"),
+            ("ja", None),
+        ]
 
 
 # Singleton instance
