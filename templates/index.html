@@ -136,6 +136,35 @@
 
             <!-- Library Tab -->
             <div class="tab-pane fade" id="library" role="tabpanel" aria-labelledby="library-tab">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        Bibliotheken verwalten
+                    </div>
+                    <div class="card-body">
+                        <form id="library-form" class="row g-3">
+                            <div class="col-md-4">
+                                <label for="library-name" class="form-label">Name</label>
+                                <input type="text" id="library-name" class="form-control" placeholder="Anime Bibliothek" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="library-path" class="form-label">Pfad</label>
+                                <input type="text" id="library-path" class="form-control" placeholder="D:\\Medien\\Animes" required>
+                            </div>
+                            <div class="col-md-2 align-self-end">
+                                <div class="form-check mt-4">
+                                    <input class="form-check-input" type="checkbox" id="library-default">
+                                    <label class="form-check-label" for="library-default">Standard</label>
+                                </div>
+                            </div>
+                            <div class="col-12 text-end">
+                                <button type="submit" class="btn btn-primary">Bibliothek hinzufügen</button>
+                            </div>
+                        </form>
+                        <div id="libraries-list" class="mt-4">
+                            <div class="text-muted">Noch keine Bibliotheken geladen.</div>
+                        </div>
+                    </div>
+                </div>
                 <div class="row mb-3">
                     <div class="col-md-6">
                         <div class="input-group">

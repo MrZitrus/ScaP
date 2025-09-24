@@ -305,16 +305,22 @@ class StreamScraper:
         self.use_real_debrid_priority = False  # Flag für Real-Debrid Priorisierung
 
         if self.config.get("real_debrid", {}).get("enabled"):
-            api_key = self.config["real_debrid"]["api_key"]
-            self.real_debrid = RealDebrid(api_key)
+            api_key = str(self.config["real_debrid"].get("api_key", "")).strip()
+            if api_key:
+                self.real_debrid = RealDebrid(api_key)
 
-            # Wenn Premium-Account vorhanden ist, aktiviere die Priorisierung
-            if self.real_debrid.is_premium:
-                self.use_real_debrid_priority = True
-                logging.info("Real-Debrid Premium Account aktiv - Priorisierung aktiviert")
+                # Wenn Premium-Account vorhanden ist, aktiviere die Priorisierung
+                if self.real_debrid.is_premium:
+                    self.use_real_debrid_priority = True
+                    logging.info("Real-Debrid Premium Account aktiv - Priorisierung aktiviert")
+                else:
+                    logging.warning("Real-Debrid Account hat kein Premium - Priorisierung deaktiviert")
+                    # Behalte den Real-Debrid-Client, aber ohne Priorisierung
             else:
-                logging.warning("Real-Debrid Account hat kein Premium - Priorisierung deaktiviert")
-                # Behalte den Real-Debrid-Client, aber ohne Priorisierung
+                logging.warning(
+                    "Real-Debrid ist aktiviert, es wurde jedoch kein API-Schlüssel konfiguriert. Deaktiviere Integration."
+                )
+                self.config["real_debrid"]["enabled"] = False
 
         # Initialisiere Jellyfin API wenn Umgebungsvariablen gesetzt sind
         jellyfin_url = os.getenv('JELLYFIN_URL')
@@ -355,6 +361,7 @@ class StreamScraper:
         logging.info(f"Using download directory: {self.download_dir}")
 
         self.download_status = DownloadStatus()
+        self._series_dir_override: Optional[str] = None
 
     def _load_config(self) -> dict:
         """Lädt die Konfigurationsdatei"""
@@ -1086,12 +1093,13 @@ class StreamScraper:
             logging.error(f"Fehler beim Verarbeiten der Serie: {str(e)}")
             return False
 
-    def start_download(self, url: str):
+    def start_download(self, url: str, series_path: Optional[str] = None):
         """Haupteinstiegspunkt für den Download."""
         if self.download_status.is_downloading:
             raise Exception("Es läuft bereits ein Download!")
 
         try:
+            self._series_dir_override = series_path or None
             self.download_status.start_download()
             self.download_status.update(status_message="Starte Download...")
             self.process_series(url)
@@ -1102,6 +1110,7 @@ class StreamScraper:
             raise
         finally:
             self.download_status.finish_download()
+            self._series_dir_override = None
 
     def reset_session(self):
         """Reset die Session für neue Downloads, ohne andere Funktionen zu beeinflussen."""
@@ -1282,6 +1291,9 @@ class StreamScraper:
 
     def _get_series_path(self, series_name: str, url: str) -> str:
         """Erstellt den Pfad für die Serie basierend auf dem Content-Typ"""
+        if self._series_dir_override:
+            os.makedirs(self._series_dir_override, exist_ok=True)
+            return self._series_dir_override
         content_type = self._get_content_type(url)
         # Sanitize the series name to avoid invalid directory names
         sanitized_series_name = self._sanitize_directory_name(series_name)

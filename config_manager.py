@@ -34,6 +34,7 @@ class ConfigManager:
         # Initialize config
         self.config = {
             # Default values
+            "libraries": [],
             "download": {
                 "directory": "downloads",
                 "max_parallel_downloads": 3,
@@ -47,8 +48,8 @@ class ConfigManager:
                 "host": "0.0.0.0"
             },
             "real_debrid": {
-                "enabled": True,
-                "api_key": "TMRQHX6JQMBKAEF6Z33IHACMRC2SVDGCY44ZVZ7T3ZA4IWXH2FGA"
+                "enabled": False,
+                "api_key": ""
             },
             "jellyfin": {
                 "enabled": False,
@@ -80,10 +81,10 @@ class ConfigManager:
                 "priorities": [
                     ["de", None],     # Deutsch
                     ["en", "de"],     # Englisch mit German Dub
-                    ["en", None],     # Englisch
                     ["ja", "de"],     # Japanisch mit German Dub
                     ["ja", "en"],     # Japanisch mit English Dub
-                    ["ja", None]      # Japanisch (Original)
+                    ["ja", None],     # Japanisch (Original)
+                    ["en", None]      # Englisch
                 ]
             }
         }
@@ -119,6 +120,11 @@ class ConfigManager:
 
     def _load_env_variables(self) -> None:
         """Load configuration from environment variables."""
+        def _env_to_bool(raw: Optional[str]) -> Optional[bool]:
+            if raw is None:
+                return None
+            return raw.strip().lower() in ("true", "1", "t", "yes", "on")
+
         # Download settings
         if os.getenv('DOWNLOAD_DIR'):
             self.config['download']['directory'] = os.getenv('DOWNLOAD_DIR')
@@ -136,14 +142,18 @@ class ConfigManager:
                 logger.warning("Invalid MAX_PARALLEL_EXTRACTIONS value, using default")
 
         if os.getenv('SCAN_ON_STARTUP'):
-            self.config['download']['scan_on_startup'] = os.getenv('SCAN_ON_STARTUP').lower() in ('true', '1', 't')
+            value = _env_to_bool(os.getenv('SCAN_ON_STARTUP'))
+            if value is not None:
+                self.config['download']['scan_on_startup'] = value
 
         if os.getenv('DB_PATH'):
             self.config['download']['db_path'] = os.getenv('DB_PATH')
 
         # Language priority settings
         if os.getenv('LANGUAGE_PRIORITY_ENABLED'):
-            self.config['language_priority']['enabled'] = os.getenv('LANGUAGE_PRIORITY_ENABLED').lower() in ('true', '1', 't')
+            value = _env_to_bool(os.getenv('LANGUAGE_PRIORITY_ENABLED'))
+            if value is not None:
+                self.config['language_priority']['enabled'] = value
 
         if os.getenv('LANGUAGE_FALLBACK_PRIORITY'):
             fallback = [part.strip().lower() for part in os.getenv('LANGUAGE_FALLBACK_PRIORITY').split(',') if part.strip()]
@@ -158,7 +168,20 @@ class ConfigManager:
                 logger.warning("Invalid FLASK_PORT value, using default")
 
         if os.getenv('FLASK_DEBUG'):
-            self.config['server']['debug'] = os.getenv('FLASK_DEBUG').lower() in ('true', '1', 't')
+            value = _env_to_bool(os.getenv('FLASK_DEBUG'))
+            if value is not None:
+                self.config['server']['debug'] = value
+
+        # Real-Debrid settings
+        if os.getenv('REAL_DEBRID_ENABLED'):
+            value = _env_to_bool(os.getenv('REAL_DEBRID_ENABLED'))
+            if value is not None:
+                self.config['real_debrid']['enabled'] = value
+
+        if os.getenv('REAL_DEBRID_API_KEY'):
+            self.config['real_debrid']['api_key'] = os.getenv('REAL_DEBRID_API_KEY')
+            if self.config['real_debrid']['api_key']:
+                self.config['real_debrid']['enabled'] = True
 
         # Jellyfin settings
         if all([os.getenv('JELLYFIN_URL'), os.getenv('JELLYFIN_API_KEY'), os.getenv('JELLYFIN_USER_ID')]):
@@ -166,6 +189,25 @@ class ConfigManager:
             self.config['jellyfin']['url'] = os.getenv('JELLYFIN_URL')
             self.config['jellyfin']['api_key'] = os.getenv('JELLYFIN_API_KEY')
             self.config['jellyfin']['user_id'] = os.getenv('JELLYFIN_USER_ID')
+
+        # Gemini settings
+        if os.getenv('GEMINI_ENABLED'):
+            value = _env_to_bool(os.getenv('GEMINI_ENABLED'))
+            if value is not None:
+                self.config['gemini']['enabled'] = value
+
+        if os.getenv('GEMINI_API_KEY'):
+            self.config['gemini']['api_key'] = os.getenv('GEMINI_API_KEY')
+            if self.config['gemini']['api_key']:
+                self.config['gemini']['enabled'] = True
+
+        if os.getenv('GEMINI_MODEL'):
+            self.config['gemini']['model'] = os.getenv('GEMINI_MODEL')
+
+        if os.getenv('GEMINI_AUTO_ENHANCE_METADATA'):
+            value = _env_to_bool(os.getenv('GEMINI_AUTO_ENHANCE_METADATA'))
+            if value is not None:
+                self.config['gemini']['auto_enhance_metadata'] = value
 
     def _update_nested_dict(self, d: Dict, u: Dict) -> Dict:
         """
@@ -196,6 +238,9 @@ class ConfigManager:
 
         if 'jellyfin' in safe_config and 'api_key' in safe_config['jellyfin']:
             safe_config['jellyfin']['api_key'] = '***' if safe_config['jellyfin']['api_key'] else ''
+
+        if 'gemini' in safe_config and 'api_key' in safe_config['gemini']:
+            safe_config['gemini']['api_key'] = '***' if safe_config['gemini']['api_key'] else ''
 
         logger.debug(f"Current configuration: {json.dumps(safe_config, indent=2)}")
 
@@ -279,10 +324,10 @@ class ConfigManager:
         return [
             ("de", None),
             ("en", "de"),
-            ("en", None),
             ("ja", "de"),
             ("ja", "en"),
             ("ja", None),
+            ("en", None),
         ]
 
 

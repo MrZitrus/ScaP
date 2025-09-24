@@ -2,6 +2,8 @@ from flask import Flask, render_template, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO
 from datetime import datetime
+from typing import Optional
+from pathlib import Path
 import os
 import json
 from scraper import StreamScraper
@@ -25,8 +27,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+BASE_DIR = Path(__file__).resolve().parent
+
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///streams.db'
+streams_db_path = BASE_DIR / 'streams.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{streams_db_path.as_posix()}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'streamscraper-secret-key'
 db = SQLAlchemy(app)
@@ -40,6 +45,13 @@ def _as_bool(value):
         return False
     return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
 
+
+def _as_int(value) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 # Models
 class Series(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -48,6 +60,12 @@ class Series(db.Model):
     type = db.Column(db.String(50))  # 'anime' oder 'series'
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     episodes = db.relationship('Episode', backref='series', lazy=True)
+    library_assignment = db.relationship(
+        'SeriesLibrary',
+        back_populates='series',
+        uselist=False,
+        cascade='all, delete-orphan'
+    )
 
 class Episode(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -58,9 +76,161 @@ class Episode(db.Model):
     status = db.Column(db.String(50))  # 'pending', 'downloading', 'completed', 'failed'
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+
+class Library(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    path = db.Column(db.String(500), nullable=False)
+    is_default = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    series_assignments = db.relationship(
+        'SeriesLibrary',
+        back_populates='library',
+        cascade='all, delete-orphan'
+    )
+
+
+class SeriesLibrary(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    series_id = db.Column(db.Integer, db.ForeignKey('series.id'), nullable=False, unique=True)
+    library_id = db.Column(db.Integer, db.ForeignKey('library.id'), nullable=False)
+    assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    series = db.relationship('Series', back_populates='library_assignment')
+    library = db.relationship('Library', back_populates='series_assignments')
+
+
+def library_to_dict(library: Library) -> dict:
+    return {
+        'id': library.id,
+        'name': library.name,
+        'path': library.path,
+        'is_default': library.is_default,
+        'created_at': library.created_at.isoformat() if library.created_at else None,
+        'updated_at': library.updated_at.isoformat() if library.updated_at else None,
+    }
+
+
+def persist_libraries_to_config() -> None:
+    try:
+        libraries = Library.query.order_by(Library.id).all()
+        config.config.setdefault('libraries', [])
+        config.config['libraries'] = [
+            {
+                'id': library.id,
+                'name': library.name,
+                'path': library.path,
+                'is_default': library.is_default,
+            }
+            for library in libraries
+        ]
+        config.save()
+    except Exception as exc:
+        logger.error(f"Fehler beim Speichern der Bibliotheken in der Konfiguration: {exc}")
+
+
+def sync_libraries_from_config() -> None:
+    libraries_cfg = config.get('libraries', []) or []
+    updated = False
+
+    for entry in libraries_cfg:
+        try:
+            name = str(entry.get('name', '')).strip()
+            path = str(entry.get('path', '')).strip()
+            if not name or not path:
+                continue
+
+            is_default = bool(entry.get('is_default', False))
+            library = Library.query.filter_by(path=path).first()
+
+            if library:
+                if library.name != name or library.is_default != is_default:
+                    library.name = name
+                    library.is_default = is_default
+                    updated = True
+            else:
+                library = Library(
+                    id=entry.get('id'),
+                    name=name,
+                    path=path,
+                    is_default=is_default
+                )
+                db.session.add(library)
+                updated = True
+        except Exception as exc:
+            logger.warning(f"Konnte Bibliothek aus Konfiguration nicht laden: {entry} ({exc})")
+
+    if updated:
+        db.session.commit()
+
+    if not Library.query.filter_by(is_default=True).first():
+        fallback = Library.query.first()
+        if fallback:
+            fallback.is_default = True
+            db.session.commit()
+            updated = True
+
+    if updated:
+        persist_libraries_to_config()
+
+
+def get_default_library() -> Optional[Library]:
+    return Library.query.filter_by(is_default=True).first()
+
+
+def determine_series_target_path(url: str, series_id: Optional[int] = None, library_id: Optional[int] = None) -> tuple[Optional[Library], Optional[str]]:
+    library: Optional[Library] = None
+
+    if library_id:
+        library = Library.query.get(library_id)
+
+    if not library and series_id:
+        assignment = SeriesLibrary.query.filter_by(series_id=series_id).first()
+        if assignment:
+            library = assignment.library
+
+    if not library:
+        library = get_default_library()
+
+    if not library:
+        return None, None
+
+    series: Optional[Series] = None
+    series_name: Optional[str] = None
+    content_dir: Optional[str] = None
+
+    if series_id:
+        series = Series.query.get(series_id)
+        if series:
+            series_name = series.title
+            if series.type:
+                content_dir = 'Animes' if series.type.lower() == 'anime' else 'Serien'
+
+    if not content_dir:
+        try:
+            content_dir = scraper._get_content_type(url)
+        except Exception:
+            content_dir = None
+
+    base_path = library.path
+    if content_dir:
+        base_path = os.path.join(base_path, content_dir)
+
+    os.makedirs(base_path, exist_ok=True)
+
+    if series_name:
+        sanitized_name = scraper._sanitize_directory_name(series_name)
+        target_path = os.path.join(base_path, sanitized_name)
+        os.makedirs(target_path, exist_ok=True)
+        return library, target_path
+
+    return library, None
+
 # Erstelle die Datenbank
 with app.app_context():
     db.create_all()
+    sync_libraries_from_config()
 
 # Initialisiere die Media-Datenbank
 media_db = get_media_db(config.get('download.db_path', 'media.db'))
@@ -176,28 +346,46 @@ def scrape_list():
 @app.route('/api/download', methods=['POST'])
 def start_download():
     """Startet den Download einer Serie"""
-    url = request.json.get('url')
+    data = request.json or {}
+    url = data.get('url')
     if not url:
         return jsonify({'error': 'URL ist erforderlich'}), 400
 
+    series_id = _as_int(data.get('series_id'))
+    library_id = _as_int(data.get('library_id'))
+
     try:
-        # Starte den Download im Hintergrund
-        # TODO: Implementiere asynchrones Downloading
-        scraper.start_download(url)
-        return jsonify({'status': 'success'})
+        library, series_path = determine_series_target_path(url, series_id=series_id, library_id=library_id)
+        if library:
+            logger.info(f"Verwende Bibliothek '{library.name}' für den Download")
+
+        scraper.start_download(url, series_path=series_path)
+
+        return jsonify({
+            'status': 'success',
+            'library': library_to_dict(library) if library else None
+        })
     except Exception as e:
+        logger.error(f"Fehler beim Starten des Downloads: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/download', methods=['POST'])
 def download():
     """Starte einen Download."""
     try:
-        url = request.json.get('url')
+        data = request.json or {}
+        url = data.get('url')
         logger.debug(f"Download-Anfrage erhalten für URL: {url}")
 
         if not url:
             logger.error("Keine URL in der Anfrage gefunden")
             return jsonify({'error': 'URL fehlt'}), 400
+
+        series_id = _as_int(data.get('series_id'))
+        library_id = _as_int(data.get('library_id'))
+        library, series_path = determine_series_target_path(url, series_id=series_id, library_id=library_id)
+        if library:
+            logger.info(f"Download wird in Bibliothek '{library.name}' abgelegt")
 
         # Prüfe ob bereits ein Download läuft
         if scraper.download_status.is_downloading:
@@ -206,11 +394,18 @@ def download():
 
         # Starte Download im Hintergrund
         logger.info(f"Starte Download-Thread für URL: {url}")
-        thread = threading.Thread(target=scraper.start_download, args=(url,))
+        thread = threading.Thread(
+            target=scraper.start_download,
+            args=(url,),
+            kwargs={'series_path': series_path}
+        )
         thread.daemon = True
         thread.start()
 
-        return jsonify({'message': 'Download gestartet'})
+        return jsonify({
+            'message': 'Download gestartet',
+            'library': library_to_dict(library) if library else None
+        })
 
     except Exception as e:
         logger.error(f"Kritischer Fehler beim Download: {str(e)}", exc_info=True)
@@ -221,6 +416,178 @@ def download_status():
     """Hole den aktuellen Download-Status"""
     status = scraper.download_status.get_status()
     return jsonify(status)
+
+
+@app.get('/api/libraries')
+def list_libraries():
+    try:
+        libraries = Library.query.order_by(Library.name.asc()).all()
+        return jsonify({
+            'status': 'success',
+            'libraries': [library_to_dict(library) for library in libraries]
+        })
+    except Exception as exc:
+        logger.error(f"Fehler beim Laden der Bibliotheken: {exc}")
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.post('/api/libraries')
+def add_library():
+    data = request.json or {}
+    name = str(data.get('name', '')).strip()
+    path = str(data.get('path', '')).strip()
+    is_default = bool(data.get('is_default', False))
+
+    if not name or not path:
+        return jsonify({'status': 'error', 'error': 'Name und Pfad sind erforderlich'}), 400
+
+    try:
+        os.makedirs(path, exist_ok=True)
+
+        if is_default:
+            for library in Library.query.filter(Library.is_default.is_(True)).all():
+                library.is_default = False
+
+        library = Library(name=name, path=path, is_default=is_default)
+        db.session.add(library)
+        db.session.commit()
+
+        persist_libraries_to_config()
+
+        return jsonify({'status': 'success', 'library': library_to_dict(library)}), 201
+    except Exception as exc:
+        logger.error(f"Fehler beim Anlegen der Bibliothek: {exc}")
+        db.session.rollback()
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.put('/api/libraries/<int:lib_id>')
+def update_library(lib_id: int):
+    data = request.json or {}
+    library = Library.query.get_or_404(lib_id)
+
+    try:
+        if 'name' in data:
+            name = str(data.get('name', '')).strip()
+            if not name:
+                return jsonify({'status': 'error', 'error': 'Name darf nicht leer sein'}), 400
+            library.name = name
+
+        if 'path' in data:
+            path = str(data.get('path', '')).strip()
+            if not path:
+                return jsonify({'status': 'error', 'error': 'Pfad darf nicht leer sein'}), 400
+            os.makedirs(path, exist_ok=True)
+            library.path = path
+
+        if 'is_default' in data:
+            is_default = bool(data.get('is_default'))
+            library.is_default = is_default
+            if is_default:
+                for other in Library.query.filter(Library.id != library.id).all():
+                    if other.is_default:
+                        other.is_default = False
+
+        db.session.commit()
+        persist_libraries_to_config()
+
+        return jsonify({'status': 'success', 'library': library_to_dict(library)})
+    except Exception as exc:
+        logger.error(f"Fehler beim Aktualisieren der Bibliothek: {exc}")
+        db.session.rollback()
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.delete('/api/libraries/<int:lib_id>')
+def delete_library(lib_id: int):
+    library = Library.query.get_or_404(lib_id)
+
+    try:
+        fallback_library = Library.query.filter(Library.id != library.id).first()
+
+        assignments = SeriesLibrary.query.filter_by(library_id=library.id).all()
+        if assignments:
+            if fallback_library:
+                for assignment in assignments:
+                    assignment.library_id = fallback_library.id
+            else:
+                for assignment in assignments:
+                    db.session.delete(assignment)
+
+        was_default = library.is_default
+        db.session.delete(library)
+        db.session.commit()
+
+        if was_default and fallback_library:
+            fallback_library.is_default = True
+            db.session.commit()
+        elif was_default and not Library.query.filter_by(is_default=True).first():
+            new_default = Library.query.first()
+            if new_default:
+                new_default.is_default = True
+                db.session.commit()
+
+        persist_libraries_to_config()
+
+        return jsonify({'status': 'success'})
+    except Exception as exc:
+        logger.error(f"Fehler beim Löschen der Bibliothek: {exc}")
+        db.session.rollback()
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.get('/api/series/<int:series_id>')
+def get_series_detail(series_id: int):
+    series = Series.query.get_or_404(series_id)
+    assignment = SeriesLibrary.query.filter_by(series_id=series.id).first()
+    library = assignment.library if assignment else None
+
+    return jsonify({
+        'status': 'success',
+        'series': {
+            'id': series.id,
+            'title': series.title,
+            'url': series.url,
+            'type': series.type,
+            'created_at': series.created_at.isoformat() if series.created_at else None,
+            'library': library_to_dict(library) if library else None
+        },
+        'libraries': [library_to_dict(item) for item in Library.query.order_by(Library.name.asc()).all()]
+    })
+
+
+@app.post('/api/series/<int:series_id>/assign_library')
+def assign_series_library(series_id: int):
+    data = request.json or {}
+    library_id = data.get('library_id')
+    if not library_id:
+        return jsonify({'status': 'error', 'error': 'library_id ist erforderlich'}), 400
+
+    series = Series.query.get_or_404(series_id)
+    library = Library.query.get_or_404(library_id)
+
+    try:
+        assignment = SeriesLibrary.query.filter_by(series_id=series.id).first()
+        if assignment:
+            assignment.library_id = library.id
+        else:
+            assignment = SeriesLibrary(series_id=series.id, library_id=library.id)
+            db.session.add(assignment)
+
+        db.session.commit()
+        return jsonify({
+            'status': 'success',
+            'series': {
+                'id': series.id,
+                'title': series.title,
+                'type': series.type,
+                'library': library_to_dict(library)
+            }
+        })
+    except Exception as exc:
+        logger.error(f"Fehler beim Zuordnen der Bibliothek: {exc}")
+        db.session.rollback()
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 @app.route('/api/media/list')
 def get_media_list():

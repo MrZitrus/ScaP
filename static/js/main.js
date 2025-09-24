@@ -23,6 +23,11 @@ const clearDbBtn = document.getElementById('clear-db-btn');
 const dbStats = document.getElementById('db-stats');
 
 // Library elements
+const libraryForm = document.getElementById('library-form');
+const libraryNameInput = document.getElementById('library-name');
+const libraryPathInput = document.getElementById('library-path');
+const libraryDefaultInput = document.getElementById('library-default');
+const librariesList = document.getElementById('libraries-list');
 const librarySearch = document.getElementById('library-search');
 const libraryType = document.getElementById('library-type');
 const libraryContent = document.getElementById('library-content');
@@ -80,6 +85,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Load library content
     loadLibraryContent();
+    loadLibraries();
 
     // Settings event listeners
     downloadDirForm.addEventListener('submit', (e) => {
@@ -91,16 +97,30 @@ document.addEventListener('DOMContentLoaded', () => {
     clearDbBtn.addEventListener('click', clearDatabase);
 
     // Library event listeners
-    librarySearch.addEventListener('input', handleLibrarySearch);
-    libraryType.addEventListener('change', () => {
-        if (librarySearch.value.trim().length > 0) {
-            filterLibraryContent(librarySearch.value.trim(), libraryType.value);
-        } else {
-            loadLibraryContent();
-        }
-    });
+    if (libraryForm) {
+        libraryForm.addEventListener('submit', handleLibraryFormSubmit);
+    }
 
-    refreshLibraryBtn.addEventListener('click', loadLibraryContent);
+    if (librarySearch) {
+        librarySearch.addEventListener('input', handleLibrarySearch);
+    }
+
+    if (libraryType) {
+        libraryType.addEventListener('change', () => {
+            if (librarySearch && librarySearch.value.trim().length > 0) {
+                filterLibraryContent(librarySearch.value.trim(), libraryType.value);
+            } else {
+                loadLibraryContent();
+            }
+        });
+    }
+
+    if (refreshLibraryBtn) {
+        refreshLibraryBtn.addEventListener('click', () => {
+            loadLibraryContent();
+            loadLibraries();
+        });
+    }
 
     // Socket.IO event listeners
     socket.on('connect', () => {
@@ -847,6 +867,10 @@ function loadMediaDetails(mediaId) {
  * Handle library search
  */
 function handleLibrarySearch() {
+    if (!librarySearch) {
+        return;
+    }
+
     const query = librarySearch.value.trim();
 
     if (query.length === 0) {
@@ -854,7 +878,8 @@ function handleLibrarySearch() {
         return;
     }
 
-    filterLibraryContent(query, libraryType.value);
+    const typeFilter = libraryType ? libraryType.value : 'all';
+    filterLibraryContent(query, typeFilter);
 }
 
 /**
@@ -903,4 +928,202 @@ function filterLibraryContent(query, type) {
         const existingMsg = libraryContent.querySelector('.alert');
         if (existingMsg) existingMsg.remove();
     }
+}
+
+/**
+ * Handle submit of the library creation form
+ */
+function handleLibraryFormSubmit(event) {
+    event.preventDefault();
+
+    if (!libraryForm || !libraryNameInput || !libraryPathInput) {
+        return;
+    }
+
+    const name = libraryNameInput.value.trim();
+    const path = libraryPathInput.value.trim();
+    const isDefault = libraryDefaultInput ? libraryDefaultInput.checked : false;
+
+    if (!name || !path) {
+        alert('Bitte gib sowohl einen Namen als auch einen Pfad an.');
+        return;
+    }
+
+    const submitButton = libraryForm.querySelector('button[type="submit"]');
+    if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Speichere...';
+    }
+
+    fetch('/api/libraries', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            name,
+            path,
+            is_default: isDefault
+        })
+    })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                libraryForm.reset();
+                if (libraryDefaultInput) {
+                    libraryDefaultInput.checked = false;
+                }
+                loadLibraries();
+                loadLibraryContent();
+            } else {
+                alert('Fehler beim Speichern der Bibliothek: ' + (data.error || 'Unbekannter Fehler'));
+            }
+        })
+        .catch(error => {
+            console.error('Error creating library:', error);
+            alert('Fehler beim Erstellen der Bibliothek');
+        })
+        .finally(() => {
+            if (submitButton) {
+                submitButton.disabled = false;
+                submitButton.textContent = 'Bibliothek hinzufügen';
+            }
+        });
+}
+
+/**
+ * Load all libraries from the backend and render them
+ */
+function loadLibraries() {
+    if (!librariesList) {
+        return;
+    }
+
+    librariesList.innerHTML = '<div class="text-muted">Lade Bibliotheken...</div>';
+
+    fetch('/api/libraries')
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                renderLibraries(Array.isArray(data.libraries) ? data.libraries : []);
+            } else {
+                librariesList.innerHTML = '<div class="alert alert-danger mb-0">Fehler beim Laden der Bibliotheken</div>';
+            }
+        })
+        .catch(error => {
+            console.error('Error loading libraries:', error);
+            librariesList.innerHTML = '<div class="alert alert-danger mb-0">Fehler beim Laden der Bibliotheken</div>';
+        });
+}
+
+/**
+ * Render the list of libraries with action buttons
+ */
+function renderLibraries(libraries) {
+    if (!librariesList) {
+        return;
+    }
+
+    if (!libraries || libraries.length === 0) {
+        librariesList.innerHTML = '<div class="alert alert-info mb-0">Keine Bibliotheken vorhanden</div>';
+        return;
+    }
+
+    let html = '<div class="list-group">';
+
+    libraries.forEach((library) => {
+        const defaultBadge = library.is_default
+            ? '<span class="badge bg-success me-2">Standard</span>'
+            : `<button type="button" class="btn btn-sm btn-outline-secondary me-2" data-action="set-default" data-id="${library.id}">Als Standard</button>`;
+
+        html += `
+            <div class="list-group-item d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="fw-bold">${library.name}</div>
+                    <div class="small text-muted">${library.path}</div>
+                </div>
+                <div class="d-flex align-items-center">
+                    ${defaultBadge}
+                    <button type="button" class="btn btn-sm btn-outline-danger" data-action="delete" data-id="${library.id}">Löschen</button>
+                </div>
+            </div>
+        `;
+    });
+
+    html += '</div>';
+
+    librariesList.innerHTML = html;
+
+    librariesList.querySelectorAll('[data-action="set-default"]').forEach((button) => {
+        button.addEventListener('click', () => {
+            setDefaultLibrary(button.getAttribute('data-id'));
+        });
+    });
+
+    librariesList.querySelectorAll('[data-action="delete"]').forEach((button) => {
+        button.addEventListener('click', () => {
+            deleteLibrary(button.getAttribute('data-id'));
+        });
+    });
+}
+
+/**
+ * Set a library as default
+ */
+function setDefaultLibrary(libraryId) {
+    const id = parseInt(libraryId, 10);
+    if (Number.isNaN(id)) {
+        return;
+    }
+
+    fetch(`/api/libraries/${id}`, {
+        method: 'PUT',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ is_default: true })
+    })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                loadLibraries();
+            } else {
+                alert('Fehler beim Aktualisieren der Bibliothek: ' + (data.error || 'Unbekannter Fehler'));
+            }
+        })
+        .catch(error => {
+            console.error('Error setting default library:', error);
+            alert('Fehler beim Setzen der Standard-Bibliothek');
+        });
+}
+
+/**
+ * Delete a library entry
+ */
+function deleteLibrary(libraryId) {
+    const id = parseInt(libraryId, 10);
+    if (Number.isNaN(id)) {
+        return;
+    }
+
+    if (!confirm('Möchtest du diese Bibliothek wirklich löschen?')) {
+        return;
+    }
+
+    fetch(`/api/libraries/${id}`, {
+        method: 'DELETE'
+    })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                loadLibraries();
+                loadLibraryContent();
+            } else {
+                alert('Fehler beim Löschen der Bibliothek: ' + (data.error || 'Unbekannter Fehler'));
+            }
+        })
+        .catch(error => {
+            console.error('Error deleting library:', error);
+            alert('Fehler beim Löschen der Bibliothek');
+        });
 }

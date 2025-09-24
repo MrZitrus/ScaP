@@ -6,20 +6,34 @@
         "scan_on_startup": true,
         "db_path": "media.db"
     },
+    "libraries": [
+        {
+            "id": 1,
+            "name": "Serien",
+            "path": "D:\\Serien",
+            "is_default": true
+        },
+        {
+            "id": 2,
+            "name": "Animes",
+            "path": "D:\\Animes",
+            "is_default": false
+        }
+    ],
     "server": {
         "port": 5000,
         "debug": true,
         "host": "127.0.0.1"
     },
     "real_debrid": {
-        "enabled": true,
-        "api_key": "3MPG4CODV34NE3TQOSLN2ZF6Y4YCPTPQJLLEYW3JVATBW7TWU3PQ"
+        "enabled": false,
+        "api_key": ""
     },
     "jellyfin": {
-        "enabled": true,
+        "enabled": false,
         "url": "http://localhost:8096/",
-        "api_key": "bb7a4258f47b40dca98033d6edb97000",
-        "user_id": "Xhafer"
+        "api_key": "",
+        "user_id": ""
     },
     "logging": {
         "level": "DEBUG",
@@ -27,8 +41,8 @@
     },
     "gemini": {
         "enabled": false,
-        "api_key": "AIzaSyAj5-0iw3fwz08ffikbR3DcqkheczFO0Z0",
-        "model": "gemini-2.5-pro-exp-03-25",
+        "api_key": "",
+        "model": "gemini-1.5-pro-latest",
         "auto_enhance_metadata": false
     },
     "language": {
@@ -46,6 +60,35 @@
             "de",
             "en",
             "ja"
+        ]
+    },
+    "language_priority": {
+        "enabled": true,
+        "priorities": [
+            [
+                "de",
+                null
+            ],
+            [
+                "en",
+                "de"
+            ],
+            [
+                "ja",
+                "de"
+            ],
+            [
+                "ja",
+                "en"
+            ],
+            [
+                "ja",
+                null
+            ],
+            [
+                "en",
+                null
+            ]
         ]
     },
     "scraper": {
