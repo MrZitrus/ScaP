@@ -12,7 +12,6 @@ const voeUrlInput = document.getElementById('voe-url');
 const voeFilenameInput = document.getElementById('voe-filename');
 const voeDownloadBtn = document.getElementById('voe-download-btn');
 const resetSessionBtn = document.getElementById('reset-session-btn');
-const cancelDownloadBtn = document.getElementById('cancel-download-btn');
 
 // Settings elements
 const downloadDirForm = document.getElementById('download-dir-form');
@@ -34,12 +33,39 @@ const libraryContent = document.getElementById('library-content');
 const refreshLibraryBtn = document.getElementById('refresh-library-btn');
 
 // Status elements
-const statusTitle = document.getElementById('status-title');
-const statusMessage = document.getElementById('status-message');
-const statusProgress = document.getElementById('status-progress');
-const statusEpisode = document.getElementById('status-episode');
-const statusTotalEpisodes = document.getElementById('status-total-episodes');
-const downloadStatus = document.getElementById('download-status');
+const statusViews = [
+    {
+        container: document.getElementById('downloadStatus'),
+        title: document.getElementById('statusTitle'),
+        message: document.getElementById('statusMessage'),
+        progressBar: document.getElementById('statusProgress'),
+        progressWrapper: (() => {
+            const bar = document.getElementById('statusProgress');
+            return bar ? bar.parentElement : null;
+        })(),
+        progressDisplayStyle: 'block',
+        episode: document.getElementById('statusEpisode'),
+        totalEpisodes: document.getElementById('statusTotalEpisodes'),
+        cancelButton: document.getElementById('cancelDownloadBtn'),
+        hideWhenInactive: true,
+    },
+    {
+        container: document.getElementById('download-status-card'),
+        title: document.getElementById('status-card-title'),
+        message: document.getElementById('status-card-message'),
+        progressBar: document.getElementById('status-card-progress'),
+        progressWrapper: document.getElementById('status-card-progress-wrapper'),
+        progressDisplayStyle: 'block',
+        episode: document.getElementById('status-card-episode'),
+        totalEpisodes: document.getElementById('status-card-total-episodes'),
+        cancelButton: document.getElementById('cancel-download-btn'),
+        hideWhenInactive: false,
+    },
+].filter(view => view.container || view.title || view.message || view.progressBar || view.cancelButton);
+
+const cancelButtons = Array.from(new Set(statusViews
+    .map(view => view.cancelButton)
+    .filter((btn) => Boolean(btn))));
 
 // Variables
 let searchTimeout = null;
@@ -72,10 +98,13 @@ document.addEventListener('DOMContentLoaded', () => {
     resetSessionBtn.addEventListener('click', resetSession);
 
     // Cancel download button
-    cancelDownloadBtn.addEventListener('click', cancelDownload);
+    cancelButtons.forEach((btn) => {
+        btn.addEventListener('click', cancelDownload);
+    });
 
     // Check download status on page load
     checkDownloadStatus();
+    setInterval(checkDownloadStatus, 5000);
 
     // Load download directory
     loadDownloadDirectory();
@@ -128,6 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     socket.on('status_update', updateStatusDisplay);
+    socket.on('download_progress', updateStatusDisplay);
 });
 
 // Functions
@@ -471,7 +501,12 @@ function cancelDownload() {
     .then(response => response.json())
     .then(data => {
         console.log('Download cancelled:', data);
-        alert('Download abgebrochen');
+        if (data && data.ok) {
+            alert('Download abgebrochen');
+        } else {
+            const message = (data && data.message) ? data.message : 'Kein aktiver Download';
+            alert(message);
+        }
         checkDownloadStatus();
     })
     .catch(error => {
@@ -484,9 +519,13 @@ function cancelDownload() {
  * Check download status
  */
 function checkDownloadStatus() {
-    fetch('/api/download/status')
+    fetch('/api/downloads/status')
         .then(response => response.json())
-        .then(updateStatusDisplay)
+        .then(data => {
+            if (data && data.ok) {
+                updateStatusDisplay(data);
+            }
+        })
         .catch(error => {
             console.error('Error checking download status:', error);
         });
@@ -495,29 +534,147 @@ function checkDownloadStatus() {
 /**
  * Update status display
  */
-function updateStatusDisplay(status) {
-    console.log('Status update:', status);
+function updateStatusDisplay(payload) {
+    if (statusViews.length === 0) {
+        return;
+    }
 
-    isDownloading = status.is_downloading;
+    console.log('Status update:', payload);
 
-    if (isDownloading) {
-        downloadStatus.classList.add('downloading');
-        statusTitle.textContent = status.title || 'Download läuft...';
-        statusMessage.textContent = status.status_message || 'Verarbeite...';
-        statusProgress.style.width = `${status.progress || 0}%`;
-        statusProgress.textContent = `${status.progress || 0}%`;
-        statusProgress.parentElement.style.display = 'flex';
-        statusEpisode.textContent = status.current_episode || '1';
-        statusTotalEpisodes.textContent = status.total_episodes || '?';
-        cancelDownloadBtn.style.display = 'inline-block';
+    let activeJob = null;
+    let active = false;
+
+    if (payload) {
+        if (payload.ok && payload.data) {
+            active = Boolean(payload.data.is_downloading);
+            activeJob = payload.data.active || null;
+        } else if (Object.prototype.hasOwnProperty.call(payload, 'job') || Object.prototype.hasOwnProperty.call(payload, 'is_downloading')) {
+            active = Boolean(payload.is_downloading);
+            activeJob = payload.job || null;
+        } else if (Object.prototype.hasOwnProperty.call(payload, 'is_downloading')) {
+            active = Boolean(payload.is_downloading);
+        }
+
+        if (!activeJob && (payload.current_title || payload.status_message)) {
+            activeJob = {
+                progress: payload.progress,
+                message: payload.status_message,
+                series_name: payload.current_title,
+                current_episode: payload.current_episode,
+                total_episodes: payload.total_episodes,
+            };
+        }
+    }
+
+    const firstMessageView = statusViews.find((view) => view.message);
+    const previousMessage = firstMessageView && firstMessageView.message
+        ? firstMessageView.message.textContent || '-'
+        : '-';
+    const fallbackMessage = payload && payload.status_message
+        ? payload.status_message
+        : previousMessage;
+
+    isDownloading = active;
+
+    if (active && activeJob) {
+        const pct = typeof activeJob.progress === 'number' && !Number.isNaN(activeJob.progress)
+            ? Math.max(0, Math.min(100, activeJob.progress))
+            : null;
+
+        statusViews.forEach((view) => {
+            const {
+                container,
+                title,
+                message,
+                progressBar,
+                progressWrapper,
+                progressDisplayStyle,
+                episode,
+                totalEpisodes,
+                cancelButton,
+                hideWhenInactive,
+            } = view;
+
+            if (container) {
+                container.classList.add('downloading');
+                if (hideWhenInactive) {
+                    container.classList.remove('hidden');
+                }
+            }
+
+            if (title) {
+                title.textContent = activeJob.series_name || activeJob.title || 'Download läuft...';
+            }
+
+            if (message) {
+                message.textContent = activeJob.message || activeJob.status_message || 'Verarbeite...';
+            }
+
+            if (progressWrapper && progressDisplayStyle) {
+                progressWrapper.style.display = progressDisplayStyle;
+            }
+
+            if (progressBar && pct !== null) {
+                progressBar.style.width = `${pct}%`;
+                progressBar.textContent = `${Math.round(pct)}%`;
+            }
+
+            if (episode) {
+                episode.textContent = activeJob.current_episode || '1';
+            }
+
+            if (totalEpisodes) {
+                totalEpisodes.textContent = activeJob.total_episodes || '?';
+            }
+
+            if (cancelButton) {
+                cancelButton.style.display = 'inline-block';
+            }
+        });
     } else {
-        downloadStatus.classList.remove('downloading');
-        statusTitle.textContent = 'Kein aktiver Download';
-        statusMessage.textContent = status.status_message || '-';
-        statusProgress.parentElement.style.display = 'none';
-        statusEpisode.textContent = '-';
-        statusTotalEpisodes.textContent = '-';
-        cancelDownloadBtn.style.display = 'none';
+        statusViews.forEach((view) => {
+            const {
+                container,
+                title,
+                message,
+                progressWrapper,
+                episode,
+                totalEpisodes,
+                cancelButton,
+                hideWhenInactive,
+            } = view;
+
+            if (container) {
+                container.classList.remove('downloading');
+                if (hideWhenInactive) {
+                    container.classList.add('hidden');
+                }
+            }
+
+            if (title) {
+                title.textContent = 'Kein aktiver Download';
+            }
+
+            if (message) {
+                message.textContent = (activeJob && (activeJob.message || activeJob.status_message)) || fallbackMessage || '-';
+            }
+
+            if (progressWrapper) {
+                progressWrapper.style.display = 'none';
+            }
+
+            if (episode) {
+                episode.textContent = '-';
+            }
+
+            if (totalEpisodes) {
+                totalEpisodes.textContent = '-';
+            }
+
+            if (cancelButton) {
+                cancelButton.style.display = 'none';
+            }
+        });
     }
 }
 

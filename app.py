@@ -38,6 +38,67 @@ db = SQLAlchemy(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 
+current_progress = {
+    "progress": 0.0,
+    "speed": None,
+    "eta": None,
+    "message": "",
+    "series_name": None,
+}
+_progress_lock = threading.Lock()
+
+
+def _copy_progress() -> dict:
+    with _progress_lock:
+        return {
+            "progress": current_progress.get("progress", 0.0),
+            "speed": current_progress.get("speed"),
+            "eta": current_progress.get("eta"),
+            "message": current_progress.get("message", ""),
+            "series_name": current_progress.get("series_name"),
+        }
+
+
+def _emit_progress(pct, speed, eta, msg):
+    with _progress_lock:
+        if isinstance(pct, (int, float)):
+            current_progress["progress"] = max(0.0, min(100.0, float(pct)))
+
+        if speed is not None:
+            try:
+                current_progress["speed"] = float(speed)
+            except (TypeError, ValueError):
+                current_progress["speed"] = None
+        else:
+            current_progress["speed"] = None
+
+        if eta is not None:
+            try:
+                current_progress["eta"] = int(eta)
+            except (TypeError, ValueError):
+                current_progress["eta"] = None
+        else:
+            current_progress["eta"] = None
+
+        if msg:
+            current_progress["message"] = str(msg)
+
+    payload = {
+        "job": _copy_progress(),
+        "is_downloading": bool(getattr(scraper.download_status, "is_downloading", False)),
+    }
+    socketio.emit("download_progress", payload, broadcast=True)
+
+
+def _prepare_progress(series_name: Optional[str] = None) -> None:
+    with _progress_lock:
+        current_progress["series_name"] = series_name
+        current_progress["progress"] = 0.0
+        current_progress["speed"] = None
+        current_progress["eta"] = None
+        current_progress["message"] = ""
+
+
 def _as_bool(value):
     if isinstance(value, bool):
         return value
@@ -215,7 +276,9 @@ def determine_series_target_path(url: str, series_id: Optional[int] = None, libr
 
     base_path = library.path
     if content_dir:
-        base_path = os.path.join(base_path, content_dir)
+        leaf = os.path.basename(os.path.normpath(base_path)).lower()
+        if leaf not in ('animes', 'serien'):
+            base_path = os.path.join(base_path, content_dir)
 
     os.makedirs(base_path, exist_ok=True)
 
@@ -242,6 +305,17 @@ scraper = StreamScraper(
     max_parallel_extractions=config.get('download.max_parallel_extractions'),
     socketio=socketio
 )
+
+
+def _current_status_payload() -> dict:
+    is_downloading = bool(scraper.download_status.is_downloading)
+    return {
+        "active": _copy_progress() if is_downloading else None,
+        "queue": [],
+        "history": [],
+        "is_downloading": is_downloading,
+    }
+
 
 # Initialisiere den Gemini Client, wenn aktiviert
 gemini_enabled = config.get('gemini.enabled', False)
@@ -359,7 +433,25 @@ def start_download():
         if library:
             logger.info(f"Verwende Bibliothek '{library.name}' für den Download")
 
-        scraper.start_download(url, series_path=series_path)
+        if scraper.download_status.is_downloading:
+            logger.warning("Es läuft bereits ein Download")
+            return jsonify({'error': 'Es läuft bereits ein Download!'}), 409
+
+        series_name = data.get('series_name') if isinstance(data.get('series_name'), str) else None
+        if series_id:
+            series_obj = Series.query.get(series_id)
+            if series_obj:
+                series_name = series_obj.title
+
+        _prepare_progress(series_name)
+
+        thread = threading.Thread(
+            target=scraper.start_download,
+            args=(url,),
+            kwargs={'series_path': series_path, 'progress_cb': _emit_progress}
+        )
+        thread.daemon = True
+        thread.start()
 
         return jsonify({
             'status': 'success',
@@ -368,6 +460,15 @@ def start_download():
     except Exception as e:
         logger.error(f"Fehler beim Starten des Downloads: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.get("/api/downloads/status")
+def api_downloads_status():
+    return jsonify({
+        "ok": True,
+        "data": _current_status_payload(),
+    })
+
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -387,17 +488,25 @@ def download():
         if library:
             logger.info(f"Download wird in Bibliothek '{library.name}' abgelegt")
 
+        series_name = data.get('series_name') if isinstance(data.get('series_name'), str) else None
+        if series_id:
+            series_obj = Series.query.get(series_id)
+            if series_obj:
+                series_name = series_obj.title
+
         # Prüfe ob bereits ein Download läuft
         if scraper.download_status.is_downloading:
             logger.warning("Es läuft bereits ein Download")
             return jsonify({'error': 'Es läuft bereits ein Download!'}), 409
+
+        _prepare_progress(series_name)
 
         # Starte Download im Hintergrund
         logger.info(f"Starte Download-Thread für URL: {url}")
         thread = threading.Thread(
             target=scraper.start_download,
             args=(url,),
-            kwargs={'series_path': series_path}
+            kwargs={'series_path': series_path, 'progress_cb': _emit_progress}
         )
         thread.daemon = True
         thread.start()
@@ -685,19 +794,32 @@ def reset_session():
         logger.error(f"Fehler beim Session-Reset: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/cancel', methods=['POST'])
-def cancel_download():
+@app.post('/api/cancel')
+def api_cancel():
     """Bricht den aktuellen Download ab."""
     try:
-        if scraper.download_status.request_cancel():
-            logger.info("Download-Abbruch angefordert")
-            return jsonify({'message': 'Download-Abbruch angefordert'}), 200
-        else:
+        if not getattr(scraper.download_status, "is_downloading", False):
             logger.warning("Kein aktiver Download zum Abbrechen")
-            return jsonify({'error': 'Kein aktiver Download zum Abbrechen'}), 400
-    except Exception as e:
-        logger.error(f"Fehler beim Abbrechen des Downloads: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+            return jsonify({"ok": False, "message": "Kein aktiver Download"}), 409
+
+        cancelled = False
+        cancel_callable = getattr(scraper.download_status, "request_cancel", None)
+        if callable(cancel_callable):
+            cancelled = bool(cancel_callable())
+        elif hasattr(scraper.download_status, "cancel_requested"):
+            scraper.download_status.cancel_requested = True
+            cancelled = True
+
+        if cancelled:
+            logger.info("Download-Abbruch angefordert")
+            _emit_progress(None, None, None, "Abbruch angefordert")
+            return jsonify({"ok": True, "message": "Abbruch angefordert"}), 200
+
+        logger.warning("Abbruch konnte nicht angefordert werden")
+        return jsonify({"ok": False, "message": "Abbruch konnte nicht angefordert werden"}), 409
+    except Exception as exc:
+        logger.exception("Cancel failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 @app.route('/api/settings/download-dir', methods=['GET', 'POST'])
 def manage_download_dir():
@@ -1303,6 +1425,14 @@ def get_episode_variants_by_series(series_url):
 def handle_connect():
     """Handle client connection"""
     logger.info(f"Client connected: {request.sid}")
+    socketio.emit(
+        'download_progress',
+        {
+            'job': _copy_progress(),
+            'is_downloading': bool(scraper.download_status.is_downloading),
+        },
+        room=request.sid
+    )
     # Send current status on connect
     status = scraper.download_status.get_status()
     socketio.emit('status_update', status, room=request.sid)

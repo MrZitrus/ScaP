@@ -10,6 +10,19 @@
     {% block head %}{% endblock %}
 </head>
 <body>
+    <div id="downloadStatus" class="global-download hidden">
+        <div class="global-download__info">
+            <strong id="statusTitle">Kein aktiver Download</strong>
+            <span id="statusMessage">-</span>
+        </div>
+        <div class="global-download__progress">
+            <div id="statusProgress" style="width: 0%;">0%</div>
+        </div>
+        <div class="global-download__meta">
+            <span>Episoden: <span id="statusEpisode">-</span>/<span id="statusTotalEpisodes">-</span></span>
+            <button id="cancelDownloadBtn" type="button" style="display: none;">Abbrechen</button>
+        </div>
+    </div>
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
         <div class="container-fluid">
             <a class="navbar-brand" href="/">Stream Scraper</a>

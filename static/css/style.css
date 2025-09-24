@@ -30,11 +30,63 @@
     transition: width 0.3s ease;
 }
 
-#cancel-download-btn {
+.global-download {
+    background-color: #212529;
+    color: #fff;
+    padding: 0.75rem 1rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+}
+
+.global-download.hidden {
     display: none;
 }
 
-/* Show cancel button when download is active */
-.downloading #cancel-download-btn {
+.global-download__info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 180px;
+}
+
+.global-download__progress {
+    flex: 1 1 200px;
+    background-color: #343a40;
+    border-radius: 4px;
+    overflow: hidden;
+    height: 20px;
+    position: relative;
+}
+
+.global-download__progress > #statusProgress {
+    background-color: #0d6efd;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    transition: width 0.3s ease;
+}
+
+.global-download__meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+#cancelDownloadBtn {
+    display: none;
+    border: none;
+    background-color: #dc3545;
+    color: #fff;
+    padding: 0.35rem 0.75rem;
+    border-radius: 4px;
+}
+
+.downloading #cancelDownloadBtn {
     display: inline-block;
 }

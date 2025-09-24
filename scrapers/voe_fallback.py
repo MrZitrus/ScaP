@@ -1,10 +1,11 @@
-"""
-VOE.sx fallback downloader using yt-dlp.
-"""
+"""VOE.sx fallback downloader using yt-dlp."""
 
 import os
 import logging
+from typing import Callable, Optional
+
 import yt_dlp
+
 
 class VoeFallbackDownloader:
     """
@@ -16,7 +17,12 @@ class VoeFallbackDownloader:
         """Initialize the downloader."""
         logging.info("VoeFallbackDownloader initialized")
 
-    def download_video(self, url, output_path):
+    def download_video(
+        self,
+        url,
+        output_path,
+        progress_cb: Optional[Callable[[Optional[float], Optional[float], Optional[float], str], None]] = None,
+    ):
         """
         Download a video from VOE.sx.
 
@@ -42,6 +48,26 @@ class VoeFallbackDownloader:
                 'extractor_args': {'youtube': {'player_skip': ['js', 'configs', 'webpage']}},
             }
 
+            if progress_cb:
+                def _hook(status_dict):
+                    try:
+                        status = status_dict.get('status')
+                        if status == 'downloading':
+                            total = status_dict.get('total_bytes') or status_dict.get('total_bytes_estimate') or 0
+                            downloaded = status_dict.get('downloaded_bytes') or 0
+                            progress = None
+                            if total:
+                                progress = max(0.0, min(100.0, (downloaded / total) * 100))
+                            speed = status_dict.get('speed')
+                            eta = status_dict.get('eta')
+                            progress_cb(progress, speed, eta, "VOE fallback download")
+                        elif status == 'finished':
+                            progress_cb(100.0, None, 0, "VOE fallback postprocessing")
+                    except Exception:
+                        logging.exception("VOE fallback progress hook failed")
+
+                ydl_opts['progress_hooks'] = [_hook]
+
             # Download the video
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
@@ -56,4 +82,6 @@ class VoeFallbackDownloader:
 
         except Exception as e:
             logging.error(f"VoeFallbackDownloader: Error downloading {url}: {str(e)}")
+            if progress_cb:
+                progress_cb(None, None, None, f"VOE fallback error: {str(e)}")
             return False
