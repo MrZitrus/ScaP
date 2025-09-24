@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Callable
 from yt_dlp import YoutubeDL
 from scrapers.voe_fallback import VoeFallbackDownloader
 from database import get_media_db, MediaDatabase
@@ -275,6 +275,7 @@ class StreamScraper:
         self.max_parallel_downloads = max_parallel_downloads
         self.max_parallel_extractions = max_parallel_extractions
         self.socketio = socketio
+        self._current_progress_cb: Optional[Callable[[Optional[float], Optional[float], Optional[float], str], None]] = None
 
         # Erstelle logs Verzeichnis falls es nicht existiert
         self.logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
@@ -380,6 +381,23 @@ class StreamScraper:
             self._logged_urls.add(url)
             with open(self.unsupported_urls_file, 'a', encoding='utf-8') as f:
                 f.write(f"{url}\n")
+
+    def _notify_progress(
+        self,
+        progress: Optional[float],
+        speed: Optional[float] = None,
+        eta: Optional[float] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        """Invoke the currently registered progress callback if available."""
+        callback = self._current_progress_cb
+        if not callback:
+            return
+
+        try:
+            callback(progress, speed, eta, message or "")
+        except Exception as exc:
+            logging.exception("Progress callback failed: %s", exc)
 
     def _find_potential_stream_links(self, episode_url: str, base_url: str) -> List[str]:
         """Findet alle potenziellen Stream-Links auf der Episode-Seite"""
@@ -546,17 +564,25 @@ class StreamScraper:
             filename = f"{title}.mp4"
             full_path = os.path.join(os.path.dirname(output_path), filename)
 
+            def _progress(progress, speed, eta, status):
+                message = status or "VOE-Fallback läuft"
+                self._notify_progress(progress, speed, eta, f"{title}: {message}")
+
+            self._notify_progress(None, message=f"{title}: VOE-Fallback gestartet")
+
             # Use the fallback downloader directly
-            success = fallback.download_video(url, full_path)
+            success = fallback.download_video(url, full_path, progress_cb=_progress if self._current_progress_cb else None)
 
             if success:
                 logging.info(f"VOE fallback: Download successful! File saved to: {full_path}")
                 return True
             else:
                 logging.error("VOE fallback: Download failed")
+                self._notify_progress(None, message=f"{title}: VOE-Fallback fehlgeschlagen")
                 return False
         except Exception as e:
             logging.error(f"VOE fallback: Error - {str(e)}")
+            self._notify_progress(None, message=f"{title}: VOE-Fallback Fehler - {str(e)}")
             return False
 
 
@@ -688,6 +714,7 @@ class StreamScraper:
             # Check if cancel was requested
             if self.download_status.is_cancel_requested():
                 logging.info(f"Download abgebrochen für: {task.title}")
+                self._notify_progress(None, message=f"{task.title}: Download abgebrochen")
                 return False
 
             try:
@@ -699,37 +726,59 @@ class StreamScraper:
 
                 logging.info(f"Starte Download: {task.title}")
                 os.makedirs(os.path.dirname(task.output_path), exist_ok=True)
+                self._notify_progress(None, message=f"{task.title}: Download wird gestartet")
 
                 # Wenn Real-Debrid verfügbar ist und noch nicht fehlgeschlagen ist
                 # Priorisiere Real-Debrid, wenn Premium-Account vorhanden ist oder es ein VOE.sx Link ist
-                if self.real_debrid and not rd_failed and (task.url.startswith(('https://voe.sx/', 'https://maxfinishseveral.com/')) or self.use_real_debrid_priority):
+                if self.real_debrid and not rd_failed and (
+                    task.url.startswith(("https://voe.sx/", "https://maxfinishseveral.com/"))
+                    or self.use_real_debrid_priority
+                ):
                     logging.debug("Nutze Real-Debrid für Download...")
                     direct_url = self.real_debrid.unrestrict_link(task.url)
                     if direct_url:
                         task.url = direct_url
                         logging.debug("Real-Debrid Link erfolgreich erstellt")
+                        self._notify_progress(None, message=f"{task.title}: Real-Debrid-Link erstellt")
                     else:
                         logging.warning("Real-Debrid fehlgeschlagen nach mehreren Versuchen")
                         logging.debug("Wechsle zu normalem Download...")
+                        self._notify_progress(
+                            None,
+                            message=f"{task.title}: Real-Debrid fehlgeschlagen, versuche Standard-Download",
+                        )
                         rd_failed = True
                         retries = 0  # Reset retries für normale Downloads
 
                         # If this is a VOE.sx URL and we have the original URL, try fallback right away
                         if is_voe and original_url:
-                            logging.info("Real-Debrid fehlgeschlagen für VOE.sx Link, versuche direkte Fallback-Methode...")
+                            logging.info(
+                                "Real-Debrid fehlgeschlagen für VOE.sx Link, versuche direkte Fallback-Methode..."
+                            )
                             if self._try_voe_fallback(original_url, task.output_path, task.title):
                                 logging.debug("VOE.sx Fallback erfolgreich, prüfe deutsche Audiospur...")
-                                ok_lang, lang_code, lang_detail = self._verify_german_audio(task.output_path, task.title)
+                                self._notify_progress(None, message=f"{task.title}: VOE-Fallback erfolgreich")
+                                ok_lang, lang_code, lang_detail = self._verify_german_audio(
+                                    task.output_path, task.title
+                                )
                                 if ok_lang:
                                     updated_path = self._apply_language_tag(task.output_path, lang_code)
                                     if updated_path:
                                         task.output_path = updated_path
                                     return True
-                                else:
-                                    logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den Sprachanforderungen: {lang_detail}")
-                                    return False
 
-                        continue
+                                logging.warning(
+                                    "VOE Fallback Datei %s entspricht nicht den Sprachanforderungen: %s",
+                                    task.title,
+                                    lang_detail,
+                                )
+                                self._notify_progress(
+                                    None,
+                                    message=f"{task.title}: VOE-Fallback ohne passende Audiospur",
+                                )
+                                return False
+
+                    continue
 
                 # Download mit yt-dlp
                 ydl_opts = {
@@ -739,6 +788,26 @@ class StreamScraper:
                     'no_warnings': True,
                     'extractor_args': {'youtube': {'player_skip': ['js', 'configs', 'webpage']}},
                 }
+
+                if self._current_progress_cb:
+                    def _hook(status_dict, *, _task=task):
+                        status = status_dict.get('status')
+                        if status == 'downloading':
+                            total = status_dict.get('total_bytes') or status_dict.get('total_bytes_estimate') or 0
+                            downloaded = status_dict.get('downloaded_bytes') or 0
+                            progress = None
+                            if total:
+                                try:
+                                    progress = max(0.0, min(100.0, (downloaded / total) * 100))
+                                except ZeroDivisionError:
+                                    progress = None
+                            speed = status_dict.get('speed')
+                            eta = status_dict.get('eta')
+                            self._notify_progress(progress, speed, eta, f"{_task.title}: Download läuft")
+                        elif status == 'finished':
+                            self._notify_progress(100.0, None, 0, f"{_task.title}: Download abgeschlossen")
+
+                    ydl_opts['progress_hooks'] = [_hook]
 
                 try:
                     with YoutubeDL(ydl_opts) as ydl:
@@ -768,6 +837,7 @@ class StreamScraper:
 
             except Exception as e:
                 logging.error(f"Download-Fehler: {str(e)}")
+                self._notify_progress(None, message=f"{task.title}: Fehler - {str(e)}")
                 retries += 1
                 if retries >= max_retries:
                     logging.error(f"Maximale Anzahl von Versuchen erreicht für {task.title}")
@@ -779,6 +849,7 @@ class StreamScraper:
                         logging.debug(f"Versuche VOE Fallback mit ursprünglicher URL: {url_to_try}")
                         if self._try_voe_fallback(url_to_try, task.output_path, task.title):
                             logging.debug("VOE.sx Fallback erfolgreich, prüfe deutsche Audiospur...")
+                            self._notify_progress(None, message=f"{task.title}: VOE-Fallback erfolgreich")
                             ok_lang, lang_code, lang_detail = self._verify_german_audio(task.output_path, task.title)
                             if ok_lang:
                                 updated_path = self._apply_language_tag(task.output_path, lang_code)
@@ -788,6 +859,7 @@ class StreamScraper:
                                 return True
                             else:
                                 logging.warning(f"VOE Fallback Datei {task.title} entspricht nicht den Sprachanforderungen: {lang_detail}")
+                                self._notify_progress(None, message=f"{task.title}: VOE-Fallback ohne passende Audiospur")
                                 return False
 
                     return False
@@ -1093,24 +1165,40 @@ class StreamScraper:
             logging.error(f"Fehler beim Verarbeiten der Serie: {str(e)}")
             return False
 
-    def start_download(self, url: str, series_path: Optional[str] = None):
+    def start_download(
+        self,
+        url: str,
+        series_path: Optional[str] = None,
+        progress_cb: Optional[Callable[[Optional[float], Optional[float], Optional[float], str], None]] = None,
+    ):
         """Haupteinstiegspunkt für den Download."""
         if self.download_status.is_downloading:
             raise Exception("Es läuft bereits ein Download!")
 
+        prev_cb = self._current_progress_cb
+        error: Optional[Exception] = None
         try:
             self._series_dir_override = series_path or None
+            self._current_progress_cb = progress_cb
             self.download_status.start_download()
             self.download_status.update(status_message="Starte Download...")
+            self._notify_progress(0.0, message="Starte Download...")
             self.process_series(url)
         except Exception as e:
+            error = e
             self.download_status.update(status_message=f"Fehler: {str(e)}")
+            self._notify_progress(None, message=f"Fehler: {str(e)}")
             # Versuche Session zurückzusetzen bei Fehlern
             self.reset_session()
             raise
         finally:
             self.download_status.finish_download()
+            if error is not None:
+                self.download_status.update(status_message=f"Fehler: {str(error)}")
+            else:
+                self._notify_progress(100.0, message="Download abgeschlossen")
             self._series_dir_override = None
+            self._current_progress_cb = prev_cb
 
     def reset_session(self):
         """Reset die Session für neue Downloads, ohne andere Funktionen zu beeinflussen."""
