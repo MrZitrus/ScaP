@@ -113,17 +113,14 @@ def subtitle_codes_from_filename(filename: str) -> Set[str]:
 
 
 def strip_language_tag_suffix(name: str) -> str:
-    result = name
-    while True:
-        match = _SUFFIX_PATTERN.search(result)
-        if not match:
-            break
+    def remove_if_language_tag(match: re.Match) -> str:
         token = _normalize_token(match.group(1))
-        if _extract_language_code_from_token(token, "dub", _LANGUAGE_CANONICAL_TOKENS) or _extract_language_code_from_token(token, "sub", _SUBTITLE_CANONICAL_TOKENS):
-            result = result[:match.start()].rstrip()
-            continue
-        break
-    return result.rstrip()
+        is_dub = _extract_language_code_from_token(token, "dub", _LANGUAGE_CANONICAL_TOKENS)
+        is_sub = _extract_language_code_from_token(token, "sub", _SUBTITLE_CANONICAL_TOKENS)
+        return "" if is_dub or is_sub else match.group(0)
+
+    result = _TAG_PATTERN.sub(remove_if_language_tag, name)
+    return re.sub(r"\s{2,}", " ", result).strip()
 
 
 def get_language_dub_tag(lang_code: str) -> str:
