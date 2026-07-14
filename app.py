@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, redirect, url_for
 from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO
 from datetime import datetime
@@ -87,7 +87,9 @@ def _emit_progress(pct, speed, eta, msg):
         "job": _copy_progress(),
         "is_downloading": bool(getattr(scraper.download_status, "is_downloading", False)),
     }
-    socketio.emit("download_progress", payload, broadcast=True)
+    # Omitting a room broadcasts to all clients. `broadcast=True` is not a
+    # supported python-socketio Server.emit keyword and raises at runtime.
+    socketio.emit("download_progress", payload)
 
 
 def _prepare_progress(series_name: Optional[str] = None) -> None:
@@ -350,6 +352,21 @@ if config.get('download.scan_on_startup', False):
 def index():
     return render_template('index.html')
 
+
+@app.route('/library')
+def library_page():
+    return redirect('/#library')
+
+
+@app.route('/settings')
+def settings_page():
+    return redirect('/#settings')
+
+
+@app.route('/about')
+def about_page():
+    return render_template('about.html')
+
 @app.route('/gemini')
 def gemini_settings():
     return render_template('gemini_settings.html',
@@ -361,7 +378,14 @@ def gemini_settings():
 @app.route('/search')
 def search():
     query = request.args.get('q', '').strip()
-    series_type = request.args.get('type', 'all')
+    requested_type = request.args.get('type')
+
+    # The navbar submits to this route without an API type. Send browser
+    # searches back to the dashboard instead of displaying raw JSON.
+    if requested_type is None:
+        return redirect(f"{url_for('index', q=query)}#search")
+
+    series_type = requested_type or 'all'
 
     if not query:
         return jsonify([])
