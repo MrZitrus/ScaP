@@ -3,33 +3,44 @@
 {% block title %}Stream Scraper{% endblock %}
 
 {% block content %}
-<div class="container mt-4">
-    <h1 class="mb-4">Stream Scraper</h1>
+<div class="container dashboard-shell">
+    <header class="hero-panel">
+        <div>
+            <span class="eyebrow">Medienverwaltung</span>
+            <h1>Deine Streams. Ein Workflow.</h1>
+            <p>Finde Inhalte, verwalte deine Bibliothek und behalte jeden Download im Blick.</p>
+        </div>
+        <div class="hero-panel__icon" aria-hidden="true"><i class="bi bi-collection-play"></i></div>
+    </header>
 
     <!-- Tabs -->
-    <ul class="nav nav-tabs mb-4" id="myTab" role="tablist">
+    <ul class="nav nav-tabs app-tabs" id="myTab" role="tablist">
         <li class="nav-item" role="presentation">
-            <button class="nav-link active" id="search-tab" data-bs-toggle="tab" data-bs-target="#search" type="button" role="tab" aria-controls="search" aria-selected="true">Suche</button>
+            <button class="nav-link active" id="search-tab" data-bs-toggle="tab" data-bs-target="#search" type="button" role="tab" aria-controls="search" aria-selected="true"><i class="bi bi-search"></i> Suche</button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="direct-tab" data-bs-toggle="tab" data-bs-target="#direct" type="button" role="tab" aria-controls="direct" aria-selected="false">Direkter Download</button>
+            <button class="nav-link" id="direct-tab" data-bs-toggle="tab" data-bs-target="#direct" type="button" role="tab" aria-controls="direct" aria-selected="false"><i class="bi bi-cloud-arrow-down"></i> Direkt</button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="status-tab" data-bs-toggle="tab" data-bs-target="#status" type="button" role="tab" aria-controls="status" aria-selected="false">Status</button>
+            <button class="nav-link" id="status-tab" data-bs-toggle="tab" data-bs-target="#status" type="button" role="tab" aria-controls="status" aria-selected="false"><i class="bi bi-activity"></i> Status</button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings" type="button" role="tab" aria-controls="settings" aria-selected="false">Einstellungen</button>
+            <button class="nav-link" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings" type="button" role="tab" aria-controls="settings" aria-selected="false"><i class="bi bi-gear"></i> Einstellungen</button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="library-tab" data-bs-toggle="tab" data-bs-target="#library" type="button" role="tab" aria-controls="library" aria-selected="false">Mediathek</button>
+            <button class="nav-link" id="library-tab" data-bs-toggle="tab" data-bs-target="#library" type="button" role="tab" aria-controls="library" aria-selected="false"><i class="bi bi-film"></i> Mediathek</button>
         </li>
     </ul>
 
     <!-- Tab Content -->
-    <div class="tab-content" id="myTabContent">
+    <div class="tab-content app-tab-content" id="myTabContent">
         <!-- Search Tab -->
         <div class="tab-pane fade show active" id="search" role="tabpanel" aria-labelledby="search-tab">
-            <div class="row mb-3">
+            <div class="section-heading">
+                <div><span class="eyebrow">Entdecken</span><h2>Was möchtest du laden?</h2></div>
+                <p>Durchsuche die lokale Datenbank oder aktualisiere die Quellen.</p>
+            </div>
+            <div class="row g-3 mb-4 align-items-center">
                 <div class="col-md-6">
                     <div class="input-group">
                         <input type="text" id="search-input" class="form-control" placeholder="Suche nach Serien oder Animes...">
@@ -42,8 +53,8 @@
                 </div>
                 <div class="col-md-6">
                     <div class="d-flex gap-2 justify-content-md-end justify-content-start mt-2 mt-md-0">
-                        <button id="update-db-btn" class="btn btn-primary">Datenbank aktualisieren</button>
-                        <button id="load-anime-list-btn" class="btn btn-secondary">Aniworld-Liste laden</button>
+                        <button id="update-db-btn" class="btn btn-primary"><i class="bi bi-arrow-repeat me-1"></i> Datenbank aktualisieren</button>
+                        <button id="load-anime-list-btn" class="btn btn-secondary"><i class="bi bi-list-stars me-1"></i> Aniworld-Liste</button>
                     </div>
                 </div>
             </div>
@@ -55,7 +66,8 @@
         </div>
 
         <!-- Direct Download Tab -->
-        <div class="tab-pane fade" id="direct" role="tabpanel" aria-labelledby="direct-tab">
+        <div class="tab-pane fade panel-narrow" id="direct" role="tabpanel" aria-labelledby="direct-tab">
+            <div class="section-heading"><div><span class="eyebrow">Schnellzugriff</span><h2>Direkter Download</h2></div><p>Füge eine gültige VOE-URL ein und starte den Download sofort.</p></div>
             <div class="mb-3">
                 <label for="voe-url" class="form-label">VOE.sx URL</label>
                 <input type="text" class="form-control" id="voe-url" placeholder="https://voe.sx/e/...">
@@ -64,7 +76,7 @@
                 <label for="voe-filename" class="form-label">Dateiname (optional)</label>
                 <input type="text" class="form-control" id="voe-filename" placeholder="video.mp4">
             </div>
-            <button id="voe-download-btn" class="btn btn-primary">Download starten</button>
+            <button id="voe-download-btn" class="btn btn-primary"><i class="bi bi-download me-1"></i> Download starten</button>
         </div>
 
         <!-- Status Tab -->
