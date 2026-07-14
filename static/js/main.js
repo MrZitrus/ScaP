@@ -31,6 +31,9 @@ const librarySearch = document.getElementById('library-search');
 const libraryType = document.getElementById('library-type');
 const libraryContent = document.getElementById('library-content');
 const refreshLibraryBtn = document.getElementById('refresh-library-btn');
+const downloadQueueList = document.getElementById('download-queue-list');
+const downloadQueueCount = document.getElementById('download-queue-count');
+const downloadHistoryList = document.getElementById('download-history-list');
 
 // Status elements
 const statusViews = [
@@ -439,11 +442,6 @@ function showAniworldMessage(message, level = 'info') {
  * Start download
  */
 function startDownload(url) {
-    if (isDownloading) {
-        alert('Es läuft bereits ein Download!');
-        return;
-    }
-
     fetch('/download', {
         method: 'POST',
         headers: {
@@ -460,9 +458,10 @@ function startDownload(url) {
         return response.json();
     })
     .then(data => {
-        console.log('Download started:', data);
+        console.log('Download queued:', data);
         // Switch to status tab
         document.getElementById('status-tab').click();
+        checkDownloadStatus();
     })
     .catch(error => {
         console.error('Error starting download:', error);
@@ -596,6 +595,7 @@ function updateStatusDisplay(payload) {
         if (payload.ok && payload.data) {
             active = Boolean(payload.data.is_downloading);
             activeJob = payload.data.active || null;
+            renderDownloadJobs(payload.data.queue || [], payload.data.history || []);
         } else if (Object.prototype.hasOwnProperty.call(payload, 'job') || Object.prototype.hasOwnProperty.call(payload, 'is_downloading')) {
             active = Boolean(payload.is_downloading);
             activeJob = payload.job || null;
@@ -724,6 +724,85 @@ function updateStatusDisplay(payload) {
             }
         });
     }
+}
+
+function renderDownloadJobs(queue, history) {
+    if (downloadQueueCount) {
+        downloadQueueCount.textContent = String(queue.length);
+    }
+    renderJobList(downloadQueueList, queue, 'Keine wartenden Downloads');
+    renderJobList(downloadHistoryList, history, 'Noch kein Verlauf');
+}
+
+function renderJobList(container, jobs, emptyMessage) {
+    if (!container) {
+        return;
+    }
+
+    container.innerHTML = '';
+    if (!jobs.length) {
+        const empty = document.createElement('div');
+        empty.className = 'list-group-item queue-job text-muted';
+        empty.textContent = emptyMessage;
+        container.appendChild(empty);
+        return;
+    }
+
+    jobs.forEach((job) => {
+        const item = document.createElement('div');
+        item.className = `list-group-item queue-job queue-job--${job.status || 'pending'}`;
+
+        const row = document.createElement('div');
+        row.className = 'd-flex align-items-start justify-content-between gap-3';
+
+        const details = document.createElement('div');
+        const title = document.createElement('strong');
+        title.textContent = job.series_name || `Download #${job.id}`;
+        const message = document.createElement('div');
+        message.className = 'queue-job__meta';
+        message.textContent = job.error || job.message || job.url;
+        details.append(title, message);
+
+        const status = document.createElement('span');
+        status.className = 'queue-job__status';
+        status.textContent = job.status || 'pending';
+        row.append(details, status);
+        item.appendChild(row);
+
+        if (job.status === 'pending' || job.status === 'failed' || job.status === 'cancelled') {
+            const actions = document.createElement('div');
+            actions.className = 'queue-job__actions';
+
+            const action = document.createElement('button');
+            action.type = 'button';
+            action.className = 'btn btn-sm btn-outline-secondary';
+            if (job.status === 'pending') {
+                action.textContent = 'Abbrechen';
+                action.addEventListener('click', () => mutateDownloadJob(job.id, 'cancel'));
+            } else {
+                action.textContent = 'Wiederholen';
+                action.addEventListener('click', () => mutateDownloadJob(job.id, 'retry'));
+            }
+            actions.appendChild(action);
+            item.appendChild(actions);
+        }
+        container.appendChild(item);
+    });
+}
+
+function mutateDownloadJob(jobId, action) {
+    fetch(`/api/downloads/${jobId}/${action}`, { method: 'POST' })
+        .then((response) => response.json().then((data) => ({ response, data })))
+        .then(({ response, data }) => {
+            if (!response.ok) {
+                throw new Error(data.message || data.error || 'Aktion fehlgeschlagen');
+            }
+            checkDownloadStatus();
+        })
+        .catch((error) => {
+            console.error(`Queue action ${action} failed:`, error);
+            alert(error.message);
+        });
 }
 
 /**

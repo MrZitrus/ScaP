@@ -100,6 +100,13 @@ body {
 .search-result-item { margin-bottom: .55rem; color: var(--text); background: var(--surface-2); border: 1px solid var(--border) !important; border-radius: 12px !important; transition: transform .2s, border-color .2s, background .2s; }
 .search-result-item:hover { color: var(--text); background: var(--surface-3); border-color: rgba(124,92,255,.55) !important; transform: translateY(-2px); }
 .search-result-item .badge { margin-left: 8px; }
+.queue-job { color: var(--text); background: transparent; border-color: var(--border); }
+.queue-job__meta { color: var(--muted); font-size: .78rem; }
+.queue-job__status { font-size: .72rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.queue-job__actions { display: flex; justify-content: flex-end; margin-top: .65rem; }
+.queue-job--failed .queue-job__status { color: var(--danger); }
+.queue-job--completed .queue-job__status { color: var(--accent-2); }
+.queue-job--cancelled .queue-job__status { color: var(--muted); }
 #search-input { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 #search-type { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .alert { color: var(--text); background: var(--surface-3); border-color: var(--border); border-radius: 12px; }

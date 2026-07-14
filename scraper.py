@@ -1183,7 +1183,10 @@ class StreamScraper:
             self.download_status.start_download()
             self.download_status.update(status_message="Starte Download...")
             self._notify_progress(0.0, message="Starte Download...")
-            self.process_series(url)
+            success = self.process_series(url)
+            if success is False:
+                raise RuntimeError("Download konnte nicht erfolgreich abgeschlossen werden")
+            return success
         except Exception as e:
             error = e
             self.download_status.update(status_message=f"Fehler: {str(e)}")
