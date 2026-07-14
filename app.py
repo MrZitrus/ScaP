@@ -197,42 +197,54 @@ def sync_libraries_from_config() -> None:
     libraries_cfg = config.get('libraries', []) or []
     updated = False
 
-    for entry in libraries_cfg:
-        try:
+    try:
+        for entry in libraries_cfg:
             name = str(entry.get('name', '')).strip()
             path = str(entry.get('path', '')).strip()
             if not name or not path:
                 continue
 
             is_default = bool(entry.get('is_default', False))
-            library = Library.query.filter_by(path=path).first()
+            configured_id = _as_int(entry.get('id'))
+
+            # The config is allowed to change a library path while keeping its
+            # stable ID. Looking up by path alone would then try to insert the
+            # already existing ID a second time and violate the primary key.
+            library = db.session.get(Library, configured_id) if configured_id else None
+            if library is None:
+                library = Library.query.filter_by(path=path).first()
 
             if library:
-                if library.name != name or library.is_default != is_default:
+                if (
+                    library.name != name
+                    or library.path != path
+                    or library.is_default != is_default
+                ):
                     library.name = name
+                    library.path = path
                     library.is_default = is_default
                     updated = True
             else:
                 library = Library(
-                    id=entry.get('id'),
                     name=name,
                     path=path,
                     is_default=is_default
                 )
                 db.session.add(library)
                 updated = True
-        except Exception as exc:
-            logger.warning(f"Konnte Bibliothek aus Konfiguration nicht laden: {entry} ({exc})")
 
-    if updated:
-        db.session.commit()
+        if not Library.query.filter_by(is_default=True).first():
+            fallback = Library.query.first()
+            if fallback:
+                fallback.is_default = True
+                updated = True
 
-    if not Library.query.filter_by(is_default=True).first():
-        fallback = Library.query.first()
-        if fallback:
-            fallback.is_default = True
+        if updated:
             db.session.commit()
-            updated = True
+    except Exception as exc:
+        db.session.rollback()
+        logger.error(f"Bibliotheken konnten nicht synchronisiert werden: {exc}", exc_info=True)
+        return
 
     if updated:
         persist_libraries_to_config()
