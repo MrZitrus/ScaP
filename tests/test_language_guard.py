@@ -200,7 +200,8 @@ class TestVariantSelection:
         assert best.audio_lang == "de"
         assert best.url == "https://example.com/de"
 
-    def test_pick_best_german_dub_priority(self):
+    @patch("language_guard._get_lang_priority", return_value=[("en", "de"), ("de", None), ("en", None), ("ja", None)])
+    def test_pick_best_german_dub_priority(self, _mock_priority):
         """Test that German dub variants are picked before regular German."""
         variants = [
             EpisodeVariant(url="https://example.com/de", source="test", audio_lang="de"),
@@ -226,7 +227,8 @@ class TestVariantSelection:
 
         assert best is None
 
-    def test_sort_by_preference(self):
+    @patch("language_guard._get_lang_priority", return_value=[("de", None), ("en", "de"), ("en", None), ("ja", None)])
+    def test_sort_by_preference(self, _mock_priority):
         """Test sorting variants by preference."""
         variants = [
             EpisodeVariant(url="https://example.com/ja", source="test", audio_lang="ja"),

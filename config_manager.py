@@ -6,6 +6,7 @@ Combines settings from .env, config.json, and environment variables.
 import os
 import json
 import logging
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
@@ -230,7 +231,9 @@ class ConfigManager:
     def _log_config(self) -> None:
         """Log the current configuration (excluding sensitive data)."""
         # Create a copy of the config without sensitive data
-        safe_config = self.config.copy()
+        # A shallow copy would share all nested dictionaries with the active
+        # configuration and replace real API keys with the masked log value.
+        safe_config = deepcopy(self.config)
 
         # Remove sensitive data
         if 'real_debrid' in safe_config and 'api_key' in safe_config['real_debrid']:

@@ -502,10 +502,20 @@ def guess_audio_and_dub(label: str) -> Tuple[Optional[str], Optional[str]]:
             dub_lang = lang
             break
 
-    # Detect audio language
+    # A dub label describes the target language, not necessarily the original
+    # audio language. Remove the matched dub phrase before looking for an
+    # explicit audio language (e.g. "Japanese German Dub" -> ja/de, while
+    # "German Dub" -> None/de).
+    audio_label = label_l
+    if dub_lang:
+        for pattern in DUB_PATTERNS[dub_lang]:
+            audio_label = re.sub(pattern, " ", audio_label, flags=re.IGNORECASE)
+        audio_label = re.sub(r'\s+', ' ', audio_label).strip()
+
+    # Detect an explicitly named original audio language.
     audio_lang: Optional[str] = None
     for lang, pats in LANG_MAP.items():
-        if _match_any(label_l, pats):
+        if _match_any(audio_label, pats):
             audio_lang = lang
             break
 
@@ -688,7 +698,7 @@ def pick_best(variants: Iterable[EpisodeVariant]) -> Optional[EpisodeVariant]:
             for v in vs:
                 if v.audio_lang == a_pref:
                     return v
-    return vs[0] if vs else None
+    return None
 
 def sort_by_preference(variants: Iterable[EpisodeVariant]) -> List[EpisodeVariant]:
     """Sort variants by language preference."""
@@ -717,13 +727,25 @@ def pick_best_with_quality(variants: Iterable[EpisodeVariant]) -> Optional[Episo
         by_pref.setdefault(key, []).append(v)
 
     # Quality order preference
-    quality_order = ["2160p", "1440p", "1080p", "720p", "480p", "360p"]
+    quality_order = {
+        "8k": 0,
+        "4320p": 0,
+        "4k": 1,
+        "uhd": 1,
+        "2160p": 1,
+        "1440p": 2,
+        "1080p": 3,
+        "full hd": 3,
+        "fhd": 3,
+        "hd": 4,
+        "720p": 4,
+        "480p": 5,
+        "sd": 5,
+        "360p": 6,
+    }
     def qrank(q):
         q = (q or "").lower()
-        try:
-            return quality_order.index(q)
-        except ValueError:
-            return 999
+        return quality_order.get(q, 999)
 
     for _, lst in by_pref.items():
         return sorted(lst, key=lambda v: qrank(v.quality))[0]

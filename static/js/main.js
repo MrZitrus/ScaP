@@ -73,18 +73,48 @@ let isDownloading = false;
 
 // Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
-    // Live search with debounce
-    searchInput.addEventListener('input', handleSearchInput);
-
-    // Type filter change
-    searchType.addEventListener('change', () => {
-        if (searchInput.value.trim().length > 0) {
-            performSearch(searchInput.value.trim(), searchType.value);
+    // Open dashboard tabs addressed by navigation redirects such as /#library.
+    const tabId = window.location.hash.slice(1);
+    if (tabId && window.bootstrap) {
+        const tabTrigger = document.querySelector(`[data-bs-target="#${CSS.escape(tabId)}"]`);
+        if (tabTrigger) {
+            bootstrap.Tab.getOrCreateInstance(tabTrigger).show();
         }
+    }
+
+    document.querySelectorAll('[data-bs-toggle="tab"]').forEach((tabTrigger) => {
+        tabTrigger.addEventListener('shown.bs.tab', (event) => {
+            const target = event.target.getAttribute('data-bs-target');
+            if (target) {
+                history.replaceState(null, '', target);
+            }
+        });
     });
 
+    // Live search with debounce
+    if (searchInput) {
+        searchInput.addEventListener('input', handleSearchInput);
+
+        const initialQuery = new URLSearchParams(window.location.search).get('q');
+        if (initialQuery) {
+            searchInput.value = initialQuery;
+            performSearch(initialQuery, searchType ? searchType.value : 'all');
+        }
+    }
+
+    // Type filter change
+    if (searchType && searchInput) {
+        searchType.addEventListener('change', () => {
+            if (searchInput.value.trim().length > 0) {
+                performSearch(searchInput.value.trim(), searchType.value);
+            }
+        });
+    }
+
     // Update database button
-    updateDbBtn.addEventListener('click', updateDatabase);
+    if (updateDbBtn) {
+        updateDbBtn.addEventListener('click', updateDatabase);
+    }
 
     // Load Aniworld list
     if (loadAnimeListBtn) {
@@ -92,10 +122,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // VOE.sx download button
-    voeDownloadBtn.addEventListener('click', startVoeDownload);
+    if (voeDownloadBtn) {
+        voeDownloadBtn.addEventListener('click', startVoeDownload);
+    }
 
     // Reset session button
-    resetSessionBtn.addEventListener('click', resetSession);
+    if (resetSessionBtn) {
+        resetSessionBtn.addEventListener('click', resetSession);
+    }
 
     // Cancel download button
     cancelButtons.forEach((btn) => {
@@ -107,23 +141,37 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(checkDownloadStatus, 5000);
 
     // Load download directory
-    loadDownloadDirectory();
+    if (downloadDirInput && currentDownloadDir) {
+        loadDownloadDirectory();
+    }
 
     // Load database statistics
-    loadDatabaseStats();
+    if (dbStats) {
+        loadDatabaseStats();
+    }
 
     // Load library content
-    loadLibraryContent();
-    loadLibraries();
+    if (libraryContent) {
+        loadLibraryContent();
+    }
+    if (librariesList) {
+        loadLibraries();
+    }
 
     // Settings event listeners
-    downloadDirForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        updateDownloadDirectory();
-    });
+    if (downloadDirForm) {
+        downloadDirForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            updateDownloadDirectory();
+        });
+    }
 
-    scanDirBtn.addEventListener('click', scanDirectory);
-    clearDbBtn.addEventListener('click', clearDatabase);
+    if (scanDirBtn) {
+        scanDirBtn.addEventListener('click', scanDirectory);
+    }
+    if (clearDbBtn) {
+        clearDbBtn.addEventListener('click', clearDatabase);
+    }
 
     // Library event listeners
     if (libraryForm) {
