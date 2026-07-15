@@ -34,6 +34,15 @@ const refreshLibraryBtn = document.getElementById('refresh-library-btn');
 const downloadQueueList = document.getElementById('download-queue-list');
 const downloadQueueCount = document.getElementById('download-queue-count');
 const downloadHistoryList = document.getElementById('download-history-list');
+const episodeSelectionModalElement = document.getElementById('episode-selection-modal');
+const episodeSelectionLoading = document.getElementById('episode-selection-loading');
+const episodeSelectionError = document.getElementById('episode-selection-error');
+const episodeSelectionContent = document.getElementById('episode-selection-content');
+const episodeSelectionTitle = document.getElementById('episode-selection-title');
+const episodeSelectionCount = document.getElementById('episode-selection-count');
+const selectAllEpisodesBtn = document.getElementById('select-all-episodes-btn');
+const selectNoEpisodesBtn = document.getElementById('select-no-episodes-btn');
+const queueSelectedEpisodesBtn = document.getElementById('queue-selected-episodes-btn');
 
 // Status elements
 const statusViews = [
@@ -49,6 +58,10 @@ const statusViews = [
         progressDisplayStyle: 'block',
         episode: document.getElementById('statusEpisode'),
         totalEpisodes: document.getElementById('statusTotalEpisodes'),
+        currentEpisode: null,
+        episodeProgressBar: null,
+        episodeProgressWrapper: null,
+        pauseButton: document.getElementById('pauseDownloadBtn'),
         cancelButton: document.getElementById('cancelDownloadBtn'),
         hideWhenInactive: true,
     },
@@ -61,18 +74,28 @@ const statusViews = [
         progressDisplayStyle: 'block',
         episode: document.getElementById('status-card-episode'),
         totalEpisodes: document.getElementById('status-card-total-episodes'),
+        currentEpisode: document.getElementById('status-card-current-episode'),
+        episodeProgressBar: document.getElementById('status-card-episode-progress'),
+        episodeProgressWrapper: document.getElementById('status-card-episode-progress-wrapper'),
+        pauseButton: document.getElementById('pause-download-btn'),
         cancelButton: document.getElementById('cancel-download-btn'),
         hideWhenInactive: false,
     },
-].filter(view => view.container || view.title || view.message || view.progressBar || view.cancelButton);
+].filter(view => view.container || view.title || view.message || view.progressBar || view.cancelButton || view.pauseButton);
 
 const cancelButtons = Array.from(new Set(statusViews
     .map(view => view.cancelButton)
+    .filter((btn) => Boolean(btn))));
+const pauseButtons = Array.from(new Set(statusViews
+    .map(view => view.pauseButton)
     .filter((btn) => Boolean(btn))));
 
 // Variables
 let searchTimeout = null;
 let isDownloading = false;
+let activeJobId = null;
+let isPaused = false;
+let pendingSelection = null;
 
 // Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
@@ -138,6 +161,19 @@ document.addEventListener('DOMContentLoaded', () => {
     cancelButtons.forEach((btn) => {
         btn.addEventListener('click', cancelDownload);
     });
+    pauseButtons.forEach((btn) => {
+        btn.addEventListener('click', togglePauseDownload);
+    });
+
+    if (selectAllEpisodesBtn) {
+        selectAllEpisodesBtn.addEventListener('click', () => setAllEpisodeChoices(true));
+    }
+    if (selectNoEpisodesBtn) {
+        selectNoEpisodesBtn.addEventListener('click', () => setAllEpisodeChoices(false));
+    }
+    if (queueSelectedEpisodesBtn) {
+        queueSelectedEpisodesBtn.addEventListener('click', queueSelectedEpisodes);
+    }
 
     // Check download status on page load
     checkDownloadStatus();
@@ -442,12 +478,157 @@ function showAniworldMessage(message, level = 'info') {
  * Start download
  */
 function startDownload(url) {
+    if (!episodeSelectionModalElement || !window.bootstrap) {
+        alert('Die Episodenauswahl konnte nicht geöffnet werden.');
+        return;
+    }
+
+    pendingSelection = { url, catalog: null };
+    episodeSelectionLoading.classList.remove('d-none');
+    episodeSelectionError.classList.add('d-none');
+    episodeSelectionContent.classList.add('d-none');
+    episodeSelectionContent.innerHTML = '';
+    episodeSelectionTitle.textContent = 'Staffeln und Episoden wählen';
+    queueSelectedEpisodesBtn.disabled = true;
+    updateEpisodeSelectionCount();
+    bootstrap.Modal.getOrCreateInstance(episodeSelectionModalElement).show();
+
+    fetch('/api/download/catalog', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+    })
+        .then((response) => response.json().then((data) => ({ response, data })))
+        .then(({ response, data }) => {
+            if (!response.ok || !data.ok) {
+                throw new Error(data.error || 'Episoden konnten nicht geladen werden');
+            }
+            pendingSelection.catalog = data.data;
+            renderEpisodeSelection(data.data);
+        })
+        .catch((error) => {
+            console.error('Episode catalog failed:', error);
+            episodeSelectionLoading.classList.add('d-none');
+            episodeSelectionError.textContent = error.message;
+            episodeSelectionError.classList.remove('d-none');
+        });
+}
+
+function renderEpisodeSelection(catalog) {
+    episodeSelectionLoading.classList.add('d-none');
+    episodeSelectionContent.classList.remove('d-none');
+    episodeSelectionTitle.textContent = catalog.series_name || 'Staffeln und Episoden wählen';
+    episodeSelectionContent.innerHTML = '';
+
+    (catalog.seasons || []).forEach((season) => {
+        const section = document.createElement('section');
+        section.className = 'episode-season';
+
+        const header = document.createElement('div');
+        header.className = 'episode-season__header';
+        const title = document.createElement('strong');
+        title.textContent = `Staffel ${season.number}`;
+        const seasonToggle = document.createElement('input');
+        seasonToggle.type = 'checkbox';
+        seasonToggle.className = 'form-check-input';
+        seasonToggle.checked = true;
+        seasonToggle.setAttribute('aria-label', `Staffel ${season.number} auswählen`);
+        header.append(title, seasonToggle);
+
+        const choices = document.createElement('div');
+        choices.className = 'episode-season__episodes';
+        (season.episodes || []).forEach((episode) => {
+            const label = document.createElement('label');
+            label.className = 'episode-choice';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'form-check-input episode-choice-input';
+            checkbox.checked = true;
+            checkbox.dataset.season = String(season.number);
+            checkbox.dataset.episode = String(episode.number);
+
+            const text = document.createElement('span');
+            const name = document.createElement('strong');
+            name.textContent = `E${String(episode.number).padStart(2, '0')} · ${episode.title || 'Ohne Titel'}`;
+            const language = document.createElement('small');
+            language.textContent = episode.has_german_dub
+                ? 'Deutsch'
+                : (episode.has_german_sub ? 'Deutsche Untertitel' : 'Keine deutsche Spur erkannt');
+            text.append(name, language);
+            label.append(checkbox, text);
+            choices.appendChild(label);
+        });
+
+        seasonToggle.addEventListener('change', () => {
+            choices.querySelectorAll('.episode-choice-input').forEach((checkbox) => {
+                checkbox.checked = seasonToggle.checked;
+            });
+            updateEpisodeSelectionCount();
+        });
+        choices.addEventListener('change', () => {
+            const episodeChoices = Array.from(choices.querySelectorAll('.episode-choice-input'));
+            seasonToggle.checked = episodeChoices.length > 0 && episodeChoices.every((choice) => choice.checked);
+            seasonToggle.indeterminate = episodeChoices.some((choice) => choice.checked) && !seasonToggle.checked;
+            updateEpisodeSelectionCount();
+        });
+
+        section.append(header, choices);
+        episodeSelectionContent.appendChild(section);
+    });
+    updateEpisodeSelectionCount();
+}
+
+function setAllEpisodeChoices(checked) {
+    if (!episodeSelectionContent) {
+        return;
+    }
+    episodeSelectionContent.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {
+        checkbox.checked = checked;
+        checkbox.indeterminate = false;
+    });
+    updateEpisodeSelectionCount();
+}
+
+function updateEpisodeSelectionCount() {
+    const selected = episodeSelectionContent
+        ? episodeSelectionContent.querySelectorAll('.episode-choice-input:checked').length
+        : 0;
+    if (episodeSelectionCount) {
+        episodeSelectionCount.textContent = `${selected} ausgewählt`;
+    }
+    if (queueSelectedEpisodesBtn) {
+        queueSelectedEpisodesBtn.disabled = selected === 0 || !pendingSelection || !pendingSelection.catalog;
+    }
+}
+
+function queueSelectedEpisodes() {
+    if (!pendingSelection || !pendingSelection.catalog) {
+        return;
+    }
+    const selection = {};
+    episodeSelectionContent.querySelectorAll('.episode-choice-input:checked').forEach((checkbox) => {
+        const season = checkbox.dataset.season;
+        if (!selection[season]) {
+            selection[season] = [];
+        }
+        selection[season].push(Number(checkbox.dataset.episode));
+    });
+    if (Object.keys(selection).length === 0) {
+        return;
+    }
+
+    queueSelectedEpisodesBtn.disabled = true;
+    queueSelectedEpisodesBtn.textContent = 'Wird eingereiht…';
     fetch('/download', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ url })
+        body: JSON.stringify({
+            url: pendingSelection.url,
+            series_name: pendingSelection.catalog.series_name,
+            selection,
+        })
     })
     .then(response => {
         if (!response.ok) {
@@ -459,6 +640,7 @@ function startDownload(url) {
     })
     .then(data => {
         console.log('Download queued:', data);
+        bootstrap.Modal.getOrCreateInstance(episodeSelectionModalElement).hide();
         // Switch to status tab
         document.getElementById('status-tab').click();
         checkDownloadStatus();
@@ -466,6 +648,10 @@ function startDownload(url) {
     .catch(error => {
         console.error('Error starting download:', error);
         alert('Fehler beim Starten des Downloads: ' + error.message);
+    })
+    .finally(() => {
+        queueSelectedEpisodesBtn.textContent = 'Zur Queue hinzufügen';
+        updateEpisodeSelectionCount();
     });
 }
 
@@ -590,11 +776,14 @@ function updateStatusDisplay(payload) {
 
     let activeJob = null;
     let active = false;
+    let authoritativeStatus = false;
 
     if (payload) {
         if (payload.ok && payload.data) {
+            authoritativeStatus = true;
             active = Boolean(payload.data.is_downloading);
             activeJob = payload.data.active || null;
+            isPaused = Boolean(payload.data.is_paused || (activeJob && activeJob.status === 'paused'));
             renderDownloadJobs(payload.data.queue || [], payload.data.history || []);
         } else if (Object.prototype.hasOwnProperty.call(payload, 'job') || Object.prototype.hasOwnProperty.call(payload, 'is_downloading')) {
             active = Boolean(payload.is_downloading);
@@ -609,9 +798,17 @@ function updateStatusDisplay(payload) {
                 message: payload.status_message,
                 series_name: payload.current_title,
                 current_episode: payload.current_episode,
+                current_season: payload.current_season,
+                completed_episodes: payload.completed_episodes,
                 total_episodes: payload.total_episodes,
+                episode_progress: payload.episode_progress,
+                is_paused: payload.is_paused,
             };
         }
+    }
+
+    if (authoritativeStatus) {
+        activeJobId = activeJob && activeJob.id ? activeJob.id : null;
     }
 
     const firstMessageView = statusViews.find((view) => view.message);
@@ -628,6 +825,12 @@ function updateStatusDisplay(payload) {
         const pct = typeof activeJob.progress === 'number' && !Number.isNaN(activeJob.progress)
             ? Math.max(0, Math.min(100, activeJob.progress))
             : null;
+        const episodePct = typeof activeJob.episode_progress === 'number' && !Number.isNaN(activeJob.episode_progress)
+            ? Math.max(0, Math.min(100, activeJob.episode_progress))
+            : null;
+        const completedEpisodes = Number.isInteger(activeJob.completed_episodes)
+            ? activeJob.completed_episodes
+            : 0;
 
         statusViews.forEach((view) => {
             const {
@@ -639,6 +842,10 @@ function updateStatusDisplay(payload) {
                 progressDisplayStyle,
                 episode,
                 totalEpisodes,
+                currentEpisode,
+                episodeProgressBar,
+                episodeProgressWrapper,
+                pauseButton,
                 cancelButton,
                 hideWhenInactive,
             } = view;
@@ -665,14 +872,36 @@ function updateStatusDisplay(payload) {
             if (progressBar && pct !== null) {
                 progressBar.style.width = `${pct}%`;
                 progressBar.textContent = `${Math.round(pct)}%`;
+                progressBar.setAttribute('aria-valuenow', String(Math.round(pct)));
+            }
+
+            if (episodeProgressWrapper) {
+                episodeProgressWrapper.style.display = 'block';
+            }
+
+            if (episodeProgressBar && episodePct !== null) {
+                episodeProgressBar.style.width = `${episodePct}%`;
+                episodeProgressBar.textContent = `${Math.round(episodePct)}%`;
+                episodeProgressBar.setAttribute('aria-valuenow', String(Math.round(episodePct)));
             }
 
             if (episode) {
-                episode.textContent = activeJob.current_episode || '1';
+                episode.textContent = String(completedEpisodes);
             }
 
             if (totalEpisodes) {
                 totalEpisodes.textContent = activeJob.total_episodes || '?';
+            }
+
+            if (currentEpisode) {
+                currentEpisode.textContent = activeJob.current_season && activeJob.current_episode
+                    ? `S${String(activeJob.current_season).padStart(2, '0')}E${String(activeJob.current_episode).padStart(2, '0')}`
+                    : '-';
+            }
+
+            if (pauseButton) {
+                pauseButton.style.display = 'inline-block';
+                pauseButton.textContent = isPaused ? 'Fortsetzen' : 'Pausieren';
             }
 
             if (cancelButton) {
@@ -688,6 +917,9 @@ function updateStatusDisplay(payload) {
                 progressWrapper,
                 episode,
                 totalEpisodes,
+                currentEpisode,
+                episodeProgressWrapper,
+                pauseButton,
                 cancelButton,
                 hideWhenInactive,
             } = view;
@@ -719,10 +951,24 @@ function updateStatusDisplay(payload) {
                 totalEpisodes.textContent = '-';
             }
 
+            if (currentEpisode) {
+                currentEpisode.textContent = '-';
+            }
+
+            if (episodeProgressWrapper) {
+                episodeProgressWrapper.style.display = 'none';
+            }
+
+            if (pauseButton) {
+                pauseButton.style.display = 'none';
+            }
+
             if (cancelButton) {
                 cancelButton.style.display = 'none';
             }
         });
+        activeJobId = null;
+        isPaused = false;
     }
 }
 
@@ -1212,6 +1458,25 @@ function filterLibraryContent(query, type) {
         const existingMsg = libraryContent.querySelector('.alert');
         if (existingMsg) existingMsg.remove();
     }
+}
+
+function togglePauseDownload() {
+    if (!activeJobId) {
+        return;
+    }
+    const action = isPaused ? 'resume' : 'pause';
+    fetch(`/api/downloads/${activeJobId}/${action}`, { method: 'POST' })
+        .then((response) => response.json().then((data) => ({ response, data })))
+        .then(({ response, data }) => {
+            if (!response.ok) {
+                throw new Error(data.message || data.error || 'Aktion fehlgeschlagen');
+            }
+            checkDownloadStatus();
+        })
+        .catch((error) => {
+            console.error(`Queue action ${action} failed:`, error);
+            alert(error.message);
+        });
 }
 
 /**

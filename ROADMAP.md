@@ -11,10 +11,10 @@ dem Netzwerk geöffnet wird.
   Spracherkennungsfehler
 - **PR #6:** Bibliotheks-Synchronisation reparieren und ungenutzte Pakete
   `lxml` sowie `google-generativeai` entfernen
-- **Dieser PR:** persistente Serien-Queue mit Neustart-Wiederaufnahme,
-  Fortschritt, Verlauf, Abbrechen und Wiederholen
-- **Als Nächstes:** Pause/Fortsetzen und Fortschritt pro Episode, danach
-  Staffel-/Episodenauswahl vor dem Download
+- **Dieser PR:** vollständige persistente Serien-Queue mit Auswahl,
+  Episodenfortschritt, Pause/Fortsetzen, Verlauf, Abbrechen und Wiederholen
+- **Als Nächstes:** verfügbare Qualität, Audio und Untertitel vor dem Start
+  anzeigen sowie vorhandene Episoden und Speicherbedarf vorab prüfen
 
 ## Priorität 1: Bugs und Stabilität
 
@@ -27,11 +27,12 @@ dem Netzwerk geöffnet wird.
 ## Priorität 2: Persistente Download-Queue
 
 - [x] mehrere Serien vormerken
-- [x] Zustände `pending`, `downloading`, `completed`, `failed` und `cancelled`
+- [x] Zustände `pending`, `downloading`, `paused`, `completed`, `failed` und `cancelled`
 - [x] Abbrechen und Wiederholen
 - [x] Queue und Verlauf nach einem Neustart wiederherstellen
-- [ ] Pause und Fortsetzen
-- [ ] Fortschritt pro Episode zusätzlich zum gesamten Auftrag
+- [x] Pause und Fortsetzen
+- [x] Fortschritt pro Episode zusätzlich zum gesamten Auftrag
+- [x] Staffel- und Episodenauswahl vor dem Download
 
 ## Priorität 3: Download-Workflow
 
