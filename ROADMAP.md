@@ -5,6 +5,17 @@ zunächst auf zuverlässiger Funktion, stabilen Downloads und einer guten
 Bedienung. Sicherheits-Hardening wird eingeplant, bevor ScaP für Zugriffe aus
 dem Netzwerk geöffnet wird.
 
+## Aktueller Update-Plan
+
+- **Erledigt:** Design-Grundlage sowie zentrale Download-, Konfigurations- und
+  Spracherkennungsfehler
+- **PR #6:** Bibliotheks-Synchronisation reparieren und ungenutzte Pakete
+  `lxml` sowie `google-generativeai` entfernen
+- **Dieser PR:** vollständige persistente Serien-Queue mit Auswahl,
+  Episodenfortschritt, Pause/Fortsetzen, Verlauf, Abbrechen und Wiederholen
+- **Als Nächstes:** verfügbare Qualität, Audio und Untertitel vor dem Start
+  anzeigen sowie vorhandene Episoden und Speicherbedarf vorab prüfen
+
 ## Priorität 1: Bugs und Stabilität
 
 - reproduzierbare Start-, Datenbank- und Bibliotheksfehler beheben
@@ -15,11 +26,13 @@ dem Netzwerk geöffnet wird.
 
 ## Priorität 2: Persistente Download-Queue
 
-- mehrere Serien und Episoden vormerken
-- Zustände `pending`, `downloading`, `completed`, `failed` und `cancelled`
-- Pause, Fortsetzen, Abbrechen und Wiederholen
-- Fortschritt pro Episode und für den gesamten Auftrag
-- Queue und Verlauf nach einem Neustart wiederherstellen
+- [x] mehrere Serien vormerken
+- [x] Zustände `pending`, `downloading`, `paused`, `completed`, `failed` und `cancelled`
+- [x] Abbrechen und Wiederholen
+- [x] Queue und Verlauf nach einem Neustart wiederherstellen
+- [x] Pause und Fortsetzen
+- [x] Fortschritt pro Episode zusätzlich zum gesamten Auftrag
+- [x] Staffel- und Episodenauswahl vor dem Download
 
 ## Priorität 3: Download-Workflow
 

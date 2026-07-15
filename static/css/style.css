@@ -100,12 +100,28 @@ body {
 .search-result-item { margin-bottom: .55rem; color: var(--text); background: var(--surface-2); border: 1px solid var(--border) !important; border-radius: 12px !important; transition: transform .2s, border-color .2s, background .2s; }
 .search-result-item:hover { color: var(--text); background: var(--surface-3); border-color: rgba(124,92,255,.55) !important; transform: translateY(-2px); }
 .search-result-item .badge { margin-left: 8px; }
+.queue-job { color: var(--text); background: transparent; border-color: var(--border); }
+.queue-job__meta { color: var(--muted); font-size: .78rem; }
+.queue-job__status { font-size: .72rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.queue-job__actions { display: flex; justify-content: flex-end; margin-top: .65rem; }
+.queue-job--failed .queue-job__status { color: var(--danger); }
+.queue-job--completed .queue-job__status { color: var(--accent-2); }
+.queue-job--cancelled .queue-job__status { color: var(--muted); }
+.queue-job--paused .queue-job__status { color: #f2c14e; }
 #search-input { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 #search-type { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .alert { color: var(--text); background: var(--surface-3); border-color: var(--border); border-radius: 12px; }
 
 .progress { height: 12px; background: var(--surface-3); border-radius: 99px; }
 .progress-bar { background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s ease; }
+.progress-bar--episode { background: linear-gradient(90deg, #24d3b5, #43a5ff); }
+.modal-content { color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.modal-header, .modal-footer { border-color: var(--border); }
+.episode-season { margin-bottom: .85rem; overflow: hidden; background: var(--surface-2); border: 1px solid var(--border); border-radius: 13px; }
+.episode-season__header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem 1rem; background: rgba(255,255,255,.025); border-bottom: 1px solid var(--border); }
+.episode-season__episodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .55rem; padding: .85rem; }
+.episode-choice { display: flex; gap: .6rem; align-items: flex-start; min-height: 58px; padding: .65rem; background: var(--surface-3); border-radius: 10px; }
+.episode-choice small { display: block; color: var(--muted); }
 .global-download { position: relative; z-index: 1040; display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; width: 100%; padding: .75rem max(1rem, calc((100% - 1140px) / 2)); color: #fff; background: linear-gradient(90deg, #32247c, #174c4c); border-bottom: 1px solid rgba(255,255,255,.12); }
 .global-download.hidden { display: none; }
 .global-download__info { display: flex; flex-direction: column; gap: .2rem; min-width: 180px; }
@@ -114,6 +130,7 @@ body {
 .global-download__progress > #statusProgress { display: flex; height: 100%; align-items: center; justify-content: center; overflow: visible; color: transparent; font-size: .7rem; font-weight: 700; background: var(--accent-2); transition: width .3s ease; }
 .global-download__meta { display: flex; align-items: center; gap: .75rem; }
 #cancelDownloadBtn { display: none; padding: .35rem .75rem; color: #fff; background: var(--danger); border: 0; border-radius: 8px; }
+#pauseDownloadBtn { display: none; padding: .35rem .75rem; color: #fff; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.18); border-radius: 8px; }
 .downloading #cancelDownloadBtn { display: inline-block; }
 
 @media (max-width: 991.98px) {

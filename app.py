@@ -1,11 +1,13 @@
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO
-from datetime import datetime
+from sqlalchemy import inspect, text
+from datetime import datetime, timezone
 from typing import Optional
 from pathlib import Path
 import os
 import json
+import secrets
 from scraper import StreamScraper
 import logging
 import threading
@@ -27,13 +29,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def utc_now() -> datetime:
+    """Return a UTC timestamp compatible with SQLite's naive DateTime fields."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__)
-streams_db_path = BASE_DIR / 'streams.db'
+streams_db_path = Path(os.environ.get('SCAP_STREAMS_DB_PATH', BASE_DIR / 'streams.db')).expanduser().resolve()
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{streams_db_path.as_posix()}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = 'streamscraper-secret-key'
+app.config['SECRET_KEY'] = os.environ.get('SCAP_SECRET_KEY') or secrets.token_hex(32)
 db = SQLAlchemy(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
@@ -59,7 +66,7 @@ def _copy_progress() -> dict:
         }
 
 
-def _emit_progress(pct, speed, eta, msg):
+def _emit_progress(pct, speed, eta, msg, job_payload=None):
     with _progress_lock:
         if isinstance(pct, (int, float)):
             current_progress["progress"] = max(0.0, min(100.0, float(pct)))
@@ -84,8 +91,8 @@ def _emit_progress(pct, speed, eta, msg):
             current_progress["message"] = str(msg)
 
     payload = {
-        "job": _copy_progress(),
-        "is_downloading": bool(getattr(scraper.download_status, "is_downloading", False)),
+        "job": job_payload or _copy_progress(),
+        "is_downloading": bool(job_payload) or bool(getattr(scraper.download_status, "is_downloading", False)),
     }
     # Omitting a room broadcasts to all clients. `broadcast=True` is not a
     # supported python-socketio Server.emit keyword and raises at runtime.
@@ -121,7 +128,7 @@ class Series(db.Model):
     title = db.Column(db.String(200), nullable=False)
     url = db.Column(db.String(500), unique=True, nullable=False)
     type = db.Column(db.String(50))  # 'anime' oder 'series'
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utc_now)
     episodes = db.relationship('Episode', backref='series', lazy=True)
     library_assignment = db.relationship(
         'SeriesLibrary',
@@ -137,7 +144,29 @@ class Episode(db.Model):
     episode = db.Column(db.Integer)
     title = db.Column(db.String(200))
     status = db.Column(db.String(50))  # 'pending', 'downloading', 'completed', 'failed'
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utc_now)
+
+
+class DownloadJob(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    url = db.Column(db.String(1000), nullable=False)
+    series_name = db.Column(db.String(200))
+    series_path = db.Column(db.String(1000))
+    library_id = db.Column(db.Integer)
+    status = db.Column(db.String(32), nullable=False, default='pending', index=True)
+    progress = db.Column(db.Float, nullable=False, default=0.0)
+    message = db.Column(db.String(500), nullable=False, default='Wartet')
+    error = db.Column(db.Text)
+    selection_json = db.Column(db.Text)
+    cancel_requested = db.Column(db.Boolean, nullable=False, default=False)
+    current_season = db.Column(db.Integer)
+    current_episode = db.Column(db.Integer)
+    completed_episodes = db.Column(db.Integer, nullable=False, default=0)
+    total_episodes = db.Column(db.Integer, nullable=False, default=0)
+    episode_progress = db.Column(db.Float, nullable=False, default=0.0)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now, index=True)
+    started_at = db.Column(db.DateTime)
+    finished_at = db.Column(db.DateTime)
 
 
 class Library(db.Model):
@@ -145,8 +174,8 @@ class Library(db.Model):
     name = db.Column(db.String(120), nullable=False)
     path = db.Column(db.String(500), nullable=False)
     is_default = db.Column(db.Boolean, default=False, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utc_now)
+    updated_at = db.Column(db.DateTime, default=utc_now, onupdate=utc_now)
     series_assignments = db.relationship(
         'SeriesLibrary',
         back_populates='library',
@@ -158,7 +187,7 @@ class SeriesLibrary(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     series_id = db.Column(db.Integer, db.ForeignKey('series.id'), nullable=False, unique=True)
     library_id = db.Column(db.Integer, db.ForeignKey('library.id'), nullable=False)
-    assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
+    assigned_at = db.Column(db.DateTime, default=utc_now)
 
     series = db.relationship('Series', back_populates='library_assignment')
     library = db.relationship('Library', back_populates='series_assignments')
@@ -173,6 +202,96 @@ def library_to_dict(library: Library) -> dict:
         'created_at': library.created_at.isoformat() if library.created_at else None,
         'updated_at': library.updated_at.isoformat() if library.updated_at else None,
     }
+
+
+def download_job_to_dict(job: DownloadJob) -> dict:
+    selection = None
+    if job.selection_json:
+        try:
+            selection = json.loads(job.selection_json)
+        except (TypeError, ValueError):
+            selection = None
+
+    return {
+        'id': job.id,
+        'url': job.url,
+        'series_name': job.series_name,
+        'series_path': job.series_path,
+        'library_id': job.library_id,
+        'status': job.status,
+        'progress': float(job.progress or 0.0),
+        'message': job.message or '',
+        'error': job.error,
+        'selection': selection,
+        'selected_episode_count': sum(len(episodes) for episodes in selection.values()) if selection else None,
+        'cancel_requested': bool(job.cancel_requested),
+        'current_season': job.current_season,
+        'current_episode': job.current_episode,
+        'completed_episodes': int(job.completed_episodes or 0),
+        'total_episodes': int(job.total_episodes or 0),
+        'episode_progress': float(job.episode_progress or 0.0),
+        'created_at': job.created_at.isoformat() if job.created_at else None,
+        'started_at': job.started_at.isoformat() if job.started_at else None,
+        'finished_at': job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+def normalize_episode_selection(value) -> Optional[dict[str, list[int]]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError('Episodenauswahl muss nach Staffeln gruppiert sein')
+
+    normalized: dict[str, list[int]] = {}
+    for raw_season, raw_episodes in value.items():
+        season = _as_int(raw_season)
+        if not season or season < 1 or not isinstance(raw_episodes, list):
+            continue
+        episodes = sorted({episode for item in raw_episodes if (episode := _as_int(item)) and episode > 0})
+        if episodes:
+            normalized[str(season)] = episodes
+    return normalized
+
+
+def recover_interrupted_download_jobs() -> int:
+    """Return interrupted jobs to the queue after an application restart."""
+    interrupted_jobs = DownloadJob.query.filter_by(status='downloading').all()
+    for job in interrupted_jobs:
+        job.status = 'pending'
+        job.progress = 0.0
+        job.message = 'Nach Neustart erneut eingereiht'
+        job.cancel_requested = False
+        job.started_at = None
+
+    if interrupted_jobs:
+        db.session.commit()
+    return len(interrupted_jobs)
+
+
+def ensure_download_job_schema() -> int:
+    """Add queue columns introduced after the first local queue preview."""
+    inspector = inspect(db.engine)
+    if 'download_job' not in inspector.get_table_names():
+        return 0
+
+    existing = {column['name'] for column in inspector.get_columns('download_job')}
+    additions = {
+        'selection_json': 'TEXT',
+        'current_season': 'INTEGER',
+        'current_episode': 'INTEGER',
+        'completed_episodes': 'INTEGER NOT NULL DEFAULT 0',
+        'total_episodes': 'INTEGER NOT NULL DEFAULT 0',
+        'episode_progress': 'FLOAT NOT NULL DEFAULT 0',
+    }
+    added = 0
+    for column, definition in additions.items():
+        if column in existing:
+            continue
+        db.session.execute(text(f'ALTER TABLE download_job ADD COLUMN {column} {definition}'))
+        added += 1
+    if added:
+        db.session.commit()
+    return added
 
 
 def persist_libraries_to_config() -> None:
@@ -307,7 +426,9 @@ def determine_series_target_path(url: str, series_id: Optional[int] = None, libr
 # Erstelle die Datenbank
 with app.app_context():
     db.create_all()
+    ensure_download_job_schema()
     sync_libraries_from_config()
+    recover_interrupted_download_jobs()
 
 # Initialisiere die Media-Datenbank
 media_db = get_media_db(config.get('download.db_path', 'media.db'))
@@ -321,14 +442,224 @@ scraper = StreamScraper(
 )
 
 
+_queue_wakeup = threading.Event()
+_queue_start_lock = threading.Lock()
+_queue_db_lock = threading.Lock()
+_queue_state_lock = threading.Lock()
+_queue_worker_started = False
+_active_queue_job_id = None
+
+
+def _set_active_queue_job(job_id: Optional[int]) -> None:
+    global _active_queue_job_id
+    with _queue_state_lock:
+        _active_queue_job_id = job_id
+
+
+def _get_active_queue_job() -> Optional[int]:
+    with _queue_state_lock:
+        return _active_queue_job_id
+
+
+def _persist_job_progress(job_id: int, pct, speed, eta, message) -> None:
+    job_payload = None
+    try:
+        with _queue_db_lock:
+            with app.app_context():
+                job = db.session.get(DownloadJob, job_id)
+                if not job or job.status not in ('downloading', 'paused'):
+                    return
+                live_status = scraper.download_status.get_status()
+                if isinstance(pct, (int, float)):
+                    job.episode_progress = max(0.0, min(100.0, float(pct)))
+                job.current_season = _as_int(live_status.get('current_season'))
+                job.current_episode = _as_int(live_status.get('current_episode'))
+                job.completed_episodes = max(0, _as_int(live_status.get('completed_episodes')) or 0)
+                job.total_episodes = max(0, _as_int(live_status.get('total_episodes')) or 0)
+                if job.total_episodes:
+                    overall = (
+                        job.completed_episodes + (job.episode_progress / 100.0)
+                    ) / job.total_episodes * 100.0
+                    job.progress = max(0.0, min(100.0, overall))
+                elif isinstance(pct, (int, float)):
+                    job.progress = job.episode_progress
+                if message:
+                    job.message = str(message)[:500]
+                db.session.commit()
+                job_payload = download_job_to_dict(job)
+    except Exception:
+        logger.exception('Fortschritt für Queue-Download %s konnte nicht gespeichert werden', job_id)
+
+    _emit_progress(pct, speed, eta, message, job_payload=job_payload)
+
+
+def _run_download_queue() -> None:
+    while True:
+        job_id = None
+        try:
+            _queue_wakeup.clear()
+            job_data = None
+
+            with _queue_db_lock:
+                with app.app_context():
+                    paused_job = DownloadJob.query.filter_by(status='paused').order_by(
+                        DownloadJob.created_at.asc(), DownloadJob.id.asc()
+                    ).first()
+                    job = None
+                    if not paused_job:
+                        job = DownloadJob.query.filter_by(status='pending').order_by(
+                            DownloadJob.created_at.asc(), DownloadJob.id.asc()
+                        ).first()
+                    if job:
+                        job.status = 'downloading'
+                        job.progress = 0.0
+                        job.message = 'Download wird gestartet'
+                        job.error = None
+                        job.cancel_requested = False
+                        job.started_at = utc_now()
+                        job.finished_at = None
+                        db.session.commit()
+                        job_data = {
+                            'id': job.id,
+                            'url': job.url,
+                            'series_name': job.series_name,
+                            'series_path': job.series_path,
+                            'selection': json.loads(job.selection_json) if job.selection_json else None,
+                        }
+
+            if not job_data:
+                _queue_wakeup.wait()
+                continue
+
+            job_id = job_data['id']
+            _set_active_queue_job(job_id)
+            _prepare_progress(job_data['series_name'])
+            error = None
+            try:
+                scraper.start_download(
+                    job_data['url'],
+                    series_path=job_data['series_path'],
+                    selection=job_data['selection'],
+                    progress_cb=lambda pct, speed, eta, message, current_id=job_id: _persist_job_progress(
+                        current_id, pct, speed, eta, message
+                    ),
+                )
+            except Exception as exc:
+                error = exc
+                logger.exception('Queue-Download %s fehlgeschlagen', job_id)
+
+            with _queue_db_lock:
+                with app.app_context():
+                    job = db.session.get(DownloadJob, job_id)
+                    if job:
+                        if job.cancel_requested:
+                            job.status = 'cancelled'
+                            job.message = 'Download abgebrochen'
+                        elif error is not None:
+                            job.status = 'failed'
+                            job.message = 'Download fehlgeschlagen'
+                            job.error = str(error)
+                        else:
+                            job.status = 'completed'
+                            job.progress = 100.0
+                            job.episode_progress = 100.0
+                            job.message = 'Download abgeschlossen'
+                        job.finished_at = utc_now()
+                        db.session.commit()
+            _set_active_queue_job(None)
+        except Exception:
+            logger.exception('Queue-Worker konnte einen Auftrag nicht verarbeiten')
+            if job_id == _get_active_queue_job():
+                _set_active_queue_job(None)
+            _queue_wakeup.wait(timeout=1.0)
+
+
+def _ensure_queue_worker() -> None:
+    global _queue_worker_started
+    with _queue_start_lock:
+        if _queue_worker_started:
+            return
+        worker = threading.Thread(target=_run_download_queue, name='download-queue', daemon=True)
+        worker.start()
+        _queue_worker_started = True
+    _queue_wakeup.set()
+
+
+def _enqueue_download(data: dict) -> tuple[DownloadJob, Optional[Library]]:
+    url = str(data.get('url', '')).strip()
+    if not url:
+        raise ValueError('URL ist erforderlich')
+
+    selection_was_provided = 'selection' in data
+    selection = normalize_episode_selection(data.get('selection'))
+    if selection_was_provided and not selection:
+        raise ValueError('Bitte mindestens eine Episode auswählen')
+
+    series_id = _as_int(data.get('series_id'))
+    library_id = _as_int(data.get('library_id'))
+    library, series_path = determine_series_target_path(
+        url, series_id=series_id, library_id=library_id
+    )
+
+    series_name = data.get('series_name') if isinstance(data.get('series_name'), str) else None
+    if series_id:
+        series_obj = db.session.get(Series, series_id)
+        if series_obj:
+            series_name = series_obj.title
+
+    job = DownloadJob(
+        url=url,
+        series_name=series_name,
+        series_path=series_path,
+        library_id=library.id if library else None,
+        selection_json=json.dumps(selection, sort_keys=True) if selection else None,
+        status='pending',
+        progress=0.0,
+        completed_episodes=0,
+        total_episodes=sum(len(episodes) for episodes in selection.values()) if selection else 0,
+        episode_progress=0.0,
+        message='Wartet in der Queue',
+    )
+    db.session.add(job)
+    db.session.commit()
+    _ensure_queue_worker()
+    _queue_wakeup.set()
+    return job, library
+
+
 def _current_status_payload() -> dict:
-    is_downloading = bool(scraper.download_status.is_downloading)
+    active_job = DownloadJob.query.filter(DownloadJob.status.in_(('downloading', 'paused'))).order_by(
+        DownloadJob.started_at.asc(), DownloadJob.id.asc()
+    ).first()
+    pending_jobs = DownloadJob.query.filter_by(status='pending').order_by(
+        DownloadJob.created_at.asc(), DownloadJob.id.asc()
+    ).all()
+    history_jobs = DownloadJob.query.filter(
+        DownloadJob.status.in_(('completed', 'failed', 'cancelled'))
+    ).order_by(DownloadJob.finished_at.desc(), DownloadJob.id.desc()).limit(20).all()
+
+    active = download_job_to_dict(active_job) if active_job else None
+    if active and active_job.id == _get_active_queue_job():
+        live_status = scraper.download_status.get_status()
+        active.update({
+            'current_season': live_status.get('current_season'),
+            'current_episode': live_status.get('current_episode'),
+            'completed_episodes': live_status.get('completed_episodes'),
+            'total_episodes': live_status.get('total_episodes'),
+            'episode_progress': live_status.get('episode_progress'),
+            'is_paused': live_status.get('is_paused'),
+        })
+
     return {
-        "active": _copy_progress() if is_downloading else None,
-        "queue": [],
-        "history": [],
-        "is_downloading": is_downloading,
+        'active': active,
+        'queue': [download_job_to_dict(job) for job in pending_jobs],
+        'history': [download_job_to_dict(job) for job in history_jobs],
+        'is_downloading': active_job is not None,
+        'is_paused': bool(active_job and active_job.status == 'paused'),
     }
+
+
+_ensure_queue_worker()
 
 
 # Initialisiere den Gemini Client, wenn aktiviert
@@ -455,47 +786,37 @@ def scrape_list():
 
 @app.route('/api/download', methods=['POST'])
 def start_download():
-    """Startet den Download einer Serie"""
-    data = request.json or {}
-    url = data.get('url')
-    if not url:
-        return jsonify({'error': 'URL ist erforderlich'}), 400
-
-    series_id = _as_int(data.get('series_id'))
-    library_id = _as_int(data.get('library_id'))
-
+    """Legt einen Serien-Download in der persistenten Queue an."""
     try:
-        library, series_path = determine_series_target_path(url, series_id=series_id, library_id=library_id)
-        if library:
-            logger.info(f"Verwende Bibliothek '{library.name}' für den Download")
-
-        if scraper.download_status.is_downloading:
-            logger.warning("Es läuft bereits ein Download")
-            return jsonify({'error': 'Es läuft bereits ein Download!'}), 409
-
-        series_name = data.get('series_name') if isinstance(data.get('series_name'), str) else None
-        if series_id:
-            series_obj = Series.query.get(series_id)
-            if series_obj:
-                series_name = series_obj.title
-
-        _prepare_progress(series_name)
-
-        thread = threading.Thread(
-            target=scraper.start_download,
-            args=(url,),
-            kwargs={'series_path': series_path, 'progress_cb': _emit_progress}
-        )
-        thread.daemon = True
-        thread.start()
-
+        job, library = _enqueue_download(request.json or {})
         return jsonify({
             'status': 'success',
+            'message': 'Download zur Queue hinzugefügt',
+            'job': download_job_to_dict(job),
             'library': library_to_dict(library) if library else None
-        })
+        }), 202
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     except Exception as e:
-        logger.error(f"Fehler beim Starten des Downloads: {e}")
+        db.session.rollback()
+        logger.error(f"Fehler beim Einreihen des Downloads: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+
+@app.post('/api/download/catalog')
+def download_catalog():
+    data = request.json or {}
+    url = str(data.get('url', '')).strip()
+    if not url:
+        return jsonify({'ok': False, 'error': 'URL ist erforderlich'}), 400
+    try:
+        catalog = scraper.get_series_catalog(url)
+        if not catalog or not catalog.get('seasons'):
+            return jsonify({'ok': False, 'error': 'Keine Staffeln oder Episoden gefunden'}), 404
+        return jsonify({'ok': True, 'data': catalog}), 200
+    except Exception as exc:
+        logger.error('Episodenauswahl für %s konnte nicht geladen werden: %s', url, exc, exc_info=True)
+        return jsonify({'ok': False, 'error': str(exc)}), 502
 
 
 @app.get("/api/downloads/status")
@@ -508,52 +829,19 @@ def api_downloads_status():
 
 @app.route('/download', methods=['POST'])
 def download():
-    """Starte einen Download."""
+    """Kompatibler Endpunkt zum Einreihen eines Downloads."""
     try:
-        data = request.json or {}
-        url = data.get('url')
-        logger.debug(f"Download-Anfrage erhalten für URL: {url}")
-
-        if not url:
-            logger.error("Keine URL in der Anfrage gefunden")
-            return jsonify({'error': 'URL fehlt'}), 400
-
-        series_id = _as_int(data.get('series_id'))
-        library_id = _as_int(data.get('library_id'))
-        library, series_path = determine_series_target_path(url, series_id=series_id, library_id=library_id)
-        if library:
-            logger.info(f"Download wird in Bibliothek '{library.name}' abgelegt")
-
-        series_name = data.get('series_name') if isinstance(data.get('series_name'), str) else None
-        if series_id:
-            series_obj = Series.query.get(series_id)
-            if series_obj:
-                series_name = series_obj.title
-
-        # Prüfe ob bereits ein Download läuft
-        if scraper.download_status.is_downloading:
-            logger.warning("Es läuft bereits ein Download")
-            return jsonify({'error': 'Es läuft bereits ein Download!'}), 409
-
-        _prepare_progress(series_name)
-
-        # Starte Download im Hintergrund
-        logger.info(f"Starte Download-Thread für URL: {url}")
-        thread = threading.Thread(
-            target=scraper.start_download,
-            args=(url,),
-            kwargs={'series_path': series_path, 'progress_cb': _emit_progress}
-        )
-        thread.daemon = True
-        thread.start()
-
+        job, library = _enqueue_download(request.json or {})
         return jsonify({
-            'message': 'Download gestartet',
+            'message': 'Download zur Queue hinzugefügt',
+            'job': download_job_to_dict(job),
             'library': library_to_dict(library) if library else None
-        })
-
+        }), 202
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     except Exception as e:
-        logger.error(f"Kritischer Fehler beim Download: {str(e)}", exc_info=True)
+        db.session.rollback()
+        logger.error(f"Fehler beim Einreihen des Downloads: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/download/status')
@@ -834,9 +1122,19 @@ def reset_session():
 def api_cancel():
     """Bricht den aktuellen Download ab."""
     try:
-        if not getattr(scraper.download_status, "is_downloading", False):
+        active_job = DownloadJob.query.filter(DownloadJob.status.in_(('downloading', 'paused'))).first()
+        if not active_job and not getattr(scraper.download_status, "is_downloading", False):
             logger.warning("Kein aktiver Download zum Abbrechen")
             return jsonify({"ok": False, "message": "Kein aktiver Download"}), 409
+
+        if active_job and active_job.status == 'paused' and active_job.id != _get_active_queue_job():
+            active_job.status = 'cancelled'
+            active_job.cancel_requested = True
+            active_job.message = 'Pausierten Download abgebrochen'
+            active_job.finished_at = utc_now()
+            db.session.commit()
+            _queue_wakeup.set()
+            return jsonify({"ok": True, "message": "Download abgebrochen"}), 200
 
         cancelled = False
         cancel_callable = getattr(scraper.download_status, "request_cancel", None)
@@ -844,6 +1142,12 @@ def api_cancel():
             cancelled = bool(cancel_callable())
         elif hasattr(scraper.download_status, "cancel_requested"):
             scraper.download_status.cancel_requested = True
+            cancelled = True
+
+        if active_job:
+            active_job.cancel_requested = True
+            active_job.message = 'Abbruch angefordert'
+            db.session.commit()
             cancelled = True
 
         if cancelled:
@@ -856,6 +1160,116 @@ def api_cancel():
     except Exception as exc:
         logger.exception("Cancel failed")
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.post('/api/downloads/<int:job_id>/cancel')
+def cancel_download_job(job_id: int):
+    with _queue_db_lock:
+        job = db.session.get(DownloadJob, job_id)
+        if not job:
+            return jsonify({'ok': False, 'message': 'Download nicht gefunden'}), 404
+
+        if job.status == 'pending':
+            job.status = 'cancelled'
+            job.cancel_requested = True
+            job.message = 'Download aus Queue entfernt'
+            job.finished_at = utc_now()
+            db.session.commit()
+            return jsonify({'ok': True, 'job': download_job_to_dict(job)}), 200
+
+        if job.status == 'paused' and job.id != _get_active_queue_job():
+            job.status = 'cancelled'
+            job.cancel_requested = True
+            job.message = 'Pausierten Download abgebrochen'
+            job.finished_at = utc_now()
+            db.session.commit()
+            response_job = download_job_to_dict(job)
+            _queue_wakeup.set()
+            return jsonify({'ok': True, 'job': response_job}), 200
+
+        if job.status in ('downloading', 'paused'):
+            job.cancel_requested = True
+            job.message = 'Abbruch angefordert'
+            db.session.commit()
+            cancel_callable = getattr(scraper.download_status, 'request_cancel', None)
+            if callable(cancel_callable):
+                cancel_callable()
+            return jsonify({'ok': True, 'job': download_job_to_dict(job)}), 200
+
+    return jsonify({'ok': False, 'message': 'Download ist nicht mehr aktiv'}), 409
+
+
+@app.post('/api/downloads/<int:job_id>/pause')
+def pause_download_job(job_id: int):
+    with _queue_db_lock:
+        job = db.session.get(DownloadJob, job_id)
+        if not job:
+            return jsonify({'ok': False, 'message': 'Download nicht gefunden'}), 404
+        if job.status != 'downloading' or job.id != _get_active_queue_job():
+            return jsonify({'ok': False, 'message': 'Nur der aktive Download kann pausiert werden'}), 409
+
+        pause_callable = getattr(scraper.download_status, 'request_pause', None)
+        if not callable(pause_callable) or not pause_callable():
+            return jsonify({'ok': False, 'message': 'Download ist noch nicht pausierbar'}), 409
+
+        job.status = 'paused'
+        job.message = 'Download pausiert'
+        db.session.commit()
+        return jsonify({'ok': True, 'job': download_job_to_dict(job)}), 200
+
+
+@app.post('/api/downloads/<int:job_id>/resume')
+def resume_download_job(job_id: int):
+    with _queue_db_lock:
+        job = db.session.get(DownloadJob, job_id)
+        if not job:
+            return jsonify({'ok': False, 'message': 'Download nicht gefunden'}), 404
+        if job.status != 'paused':
+            return jsonify({'ok': False, 'message': 'Download ist nicht pausiert'}), 409
+
+        if job.id == _get_active_queue_job():
+            resume_callable = getattr(scraper.download_status, 'resume', None)
+            if not callable(resume_callable) or not resume_callable():
+                return jsonify({'ok': False, 'message': 'Download konnte nicht fortgesetzt werden'}), 409
+            job.status = 'downloading'
+            job.message = 'Download wird fortgesetzt'
+        else:
+            job.status = 'pending'
+            job.message = 'Fortsetzen in der Queue vorgemerkt'
+            job.started_at = None
+        db.session.commit()
+        response_job = download_job_to_dict(job)
+
+    _ensure_queue_worker()
+    _queue_wakeup.set()
+    return jsonify({'ok': True, 'job': response_job}), 202
+
+
+@app.post('/api/downloads/<int:job_id>/retry')
+def retry_download_job(job_id: int):
+    with _queue_db_lock:
+        job = db.session.get(DownloadJob, job_id)
+        if not job:
+            return jsonify({'ok': False, 'message': 'Download nicht gefunden'}), 404
+        if job.status not in ('failed', 'cancelled'):
+            return jsonify({'ok': False, 'message': 'Nur fehlgeschlagene oder abgebrochene Downloads können wiederholt werden'}), 409
+
+        job.status = 'pending'
+        job.progress = 0.0
+        job.message = 'Erneut eingereiht'
+        job.error = None
+        job.cancel_requested = False
+        job.current_season = None
+        job.current_episode = None
+        job.completed_episodes = 0
+        job.episode_progress = 0.0
+        job.started_at = None
+        job.finished_at = None
+        db.session.commit()
+        response_job = download_job_to_dict(job)
+    _ensure_queue_worker()
+    _queue_wakeup.set()
+    return jsonify({'ok': True, 'job': response_job}), 202
 
 @app.route('/api/settings/download-dir', methods=['GET', 'POST'])
 def manage_download_dir():
